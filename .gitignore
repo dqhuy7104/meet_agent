@@ -2,7 +2,10 @@
 __pycache__/
 *.py[cod]
 .env
+
 node_modules/
 dist/
 ai_training/results/*
 !ai_training/results/.gitkeep
+docs/
+duong/dan/folder/
