@@ -1,0 +1,1 @@
+"""Diarization training entry point."""

@@ -1,0 +1,1 @@
+# Web image placeholder.

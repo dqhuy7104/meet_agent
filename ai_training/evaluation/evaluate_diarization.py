@@ -1,0 +1,1 @@
+"""Diarization evaluation entry point."""
