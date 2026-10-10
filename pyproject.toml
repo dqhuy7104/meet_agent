@@ -4,9 +4,12 @@ version = "0.1.0"
 requires-python = ">=3.10"
 dependencies = [
   "datasets",
+  "fastapi",
   "kagglehub",
   "pyannote.audio",
+  "python-multipart",
   "silero-vad[all]",
   "torchcodec==0.9.1",
   "transformers",
+  "uvicorn",
 ]
