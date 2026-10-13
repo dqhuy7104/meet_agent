@@ -10,6 +10,7 @@ dependencies = [
   "python-multipart",
   "silero-vad[all]",
   "torchcodec==0.9.1",
+  "torchaudio",
   "transformers",
   "uvicorn",
 ]

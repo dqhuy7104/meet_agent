@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import unittest
 import wave
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -36,7 +37,7 @@ class FakeRegistry:
         self.calls: list[str] = []
         annotation = Annotation(uri="upload")
         annotation[Segment(0.0, 1.0), "turn-1"] = "SPEAKER_00"
-        self.annotation = annotation
+        self.annotation: Annotation | SimpleNamespace = annotation
 
     def get_vad(self) -> object:
         """Return a dummy VAD model."""
@@ -48,7 +49,7 @@ class FakeRegistry:
         self.calls.append("diarization")
         return self
 
-    def __call__(self, audio: object) -> Annotation:
+    def __call__(self, audio: object) -> Annotation | SimpleNamespace:
         """Return a known speaker turn."""
         return self.annotation
 
@@ -111,6 +112,46 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["transcript"], "")
         self.assertEqual(self.models.calls, ["vad"])
+
+    async def test_overlapping_turns_are_preserved_and_best_speaker_is_assigned(self) -> None:
+        annotation = Annotation(uri="overlap")
+        annotation[Segment(0.0, 0.4), "turn-1"] = "SPEAKER_00"
+        annotation[Segment(0.3, 1.0), "turn-2"] = "SPEAKER_01"
+        self.models.annotation = SimpleNamespace(speaker_diarization=annotation)
+
+        with patch(
+            "app.pipelines.meeting_pipeline.get_speech_timestamps",
+            return_value=[{"start": 0, "end": SAMPLE_RATE}],
+        ), patch.object(self.models, "get_asr", return_value=lambda audio: {"text": "Xin chào"}):
+            response = await self.client.post(
+                "/api/audio/process",
+                files={"file": ("sample.wav", _wav_bytes(), "audio/wav")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["transcript_segments"][0]["speaker"], "SPEAKER_01")
+        self.assertEqual(
+            [turn["speaker"] for turn in body["diarization_segments"]],
+            ["SPEAKER_00", "SPEAKER_01"],
+        )
+
+    async def test_region_without_speaker_overlap_is_unknown(self) -> None:
+        annotation = Annotation(uri="no-overlap")
+        annotation[Segment(2.0, 3.0), "turn-1"] = "SPEAKER_00"
+        self.models.annotation = annotation
+
+        with patch(
+            "app.pipelines.meeting_pipeline.get_speech_timestamps",
+            return_value=[{"start": 0, "end": SAMPLE_RATE}],
+        ), patch.object(self.models, "get_asr", return_value=lambda audio: {"text": "Xin chào"}):
+            response = await self.client.post(
+                "/api/audio/process",
+                files={"file": ("sample.wav", _wav_bytes(), "audio/wav")},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["transcript_segments"][0]["speaker"], "unknown")
 
     async def test_invalid_audio_returns_400_without_loading_models(self) -> None:
         """Invalid bytes fail during preprocessing before any model is used."""

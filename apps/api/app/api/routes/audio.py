@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import logging
 import asyncio
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -39,13 +39,13 @@ async def process_audio_upload(
     if file.size is not None and file.size > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Audio file exceeds 25 MiB")
     try:
-        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        audio_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
     finally:
         await file.close()
-    if len(data) > MAX_UPLOAD_BYTES:
+    if len(audio_bytes) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Audio file exceeds 25 MiB")
     try:
-        return await _run_pipeline(data, file.filename or "audio", models)
+        return await _run_pipeline(audio_bytes, file.filename or "audio", models)
     except InvalidAudioError as error:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(error)) from error
     except ModelLoadError as error:

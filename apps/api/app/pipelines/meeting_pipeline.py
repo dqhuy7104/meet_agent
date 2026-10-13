@@ -2,40 +2,15 @@
 
 from __future__ import annotations
 
-from typing import Any
-
 import numpy as np
 import torch
 from silero_vad import get_speech_timestamps
 
 from app.core.audio_models import ModelRegistry
-from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
+from app.schemas.transcript import AudioProcessResponse, SpeechSegment, TranscriptSegment
+from app.services.alignment.align import speaker_for_region
 from app.services.audio.preprocess import SAMPLE_RATE, decode_audio
-
-
-def _overlap(start: float, end: float, turn: SpeakerTurn) -> float:
-    """Return the number of seconds shared with a speaker turn."""
-    return max(0.0, min(end, turn.end) - max(start, turn.start))
-
-
-def _speaker_for(start: float, end: float, turns: list[SpeakerTurn]) -> str:
-    """Assign the speaker with greatest temporal overlap, if any."""
-    if not turns:
-        return "unknown"
-    best = max(turns, key=lambda turn: _overlap(start, end, turn))
-    return best.speaker if _overlap(start, end, best) > 0 else "unknown"
-
-
-def _diarization_turns(result: Any) -> list[SpeakerTurn]:
-    """Convert either pyannote 4 output or a legacy annotation to API turns."""
-    annotation = getattr(result, "speaker_diarization", result)
-    return sorted(
-        [
-            SpeakerTurn(start=float(segment.start), end=float(segment.end), speaker=str(speaker))
-            for segment, _, speaker in annotation.itertracks(yield_label=True)
-        ],
-        key=lambda turn: (turn.start, turn.end, turn.speaker),
-    )
+from app.services.diarization.pyannote import diarization_turns
 
 
 def process_audio(data: bytes, filename: str, models: ModelRegistry) -> AudioProcessResponse:
@@ -63,7 +38,7 @@ def process_audio(data: bytes, filename: str, models: ModelRegistry) -> AudioPro
         )
 
     diarization = models.get_diarization()
-    turns = _diarization_turns(diarization({"waveform": audio.unsqueeze(0), "sample_rate": SAMPLE_RATE}))
+    turns = diarization_turns(diarization({"waveform": audio.unsqueeze(0), "sample_rate": SAMPLE_RATE}))
     asr = models.get_asr()
     transcripts: list[TranscriptSegment] = []
     for part in timestamps:
@@ -77,7 +52,7 @@ def process_audio(data: bytes, filename: str, models: ModelRegistry) -> AudioPro
             continue
         start, end = start_sample / SAMPLE_RATE, end_sample / SAMPLE_RATE
         transcripts.append(
-            TranscriptSegment(start=start, end=end, speaker=_speaker_for(start, end, turns), text=text)
+            TranscriptSegment(start=start, end=end, speaker=speaker_for_region(start, end, turns), text=text)
         )
     return AudioProcessResponse(
         filename=filename,

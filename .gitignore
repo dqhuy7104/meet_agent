@@ -5,7 +5,7 @@ __pycache__/
 
 node_modules/
 dist/
-ai_training/data/*
+ai_training/datasets/*
 ai_training/results/*
 !ai_training/results/.gitkeep
 docs/
