@@ -42,6 +42,16 @@ class MeetingDetail:
     transcript_segments: list[TranscriptSegment]
 
 
+@dataclass(frozen=True)
+class SearchHit:
+    meeting_id: str
+    title: str | None
+    speaker: str
+    start: float
+    end: float
+    text: str
+
+
 def _record(row: sqlite3.Row) -> MeetingRecord:
     return MeetingRecord(**dict(row))
 
@@ -243,3 +253,28 @@ class MeetingRepository:
         except BaseException:
             self.connection.rollback()
             raise
+
+    def search_segments(self, query: str, limit: int, offset: int) -> tuple[list[SearchHit], int]:
+        """Search completed transcript segments using escaped plain text terms."""
+        terms = query.split()
+        expression = " AND ".join('"' + term.replace('"', '""') + '"' for term in terms)
+        if not expression:
+            return [], 0
+        joined = """FROM transcript_fts
+            JOIN transcript_segments AS segment ON segment.id = CAST(transcript_fts.segment_id AS INTEGER)
+            JOIN meetings AS meeting ON meeting.id = segment.meeting_id
+            WHERE transcript_fts MATCH ? AND meeting.status='completed'"""
+        total = self.connection.execute("SELECT count(*) " + joined, (expression,)).fetchone()[0]
+        rows = self.connection.execute(
+            """SELECT meeting.id AS meeting_id, meeting.title, segment.speaker,
+               segment.start_seconds, segment.end_seconds, segment.text """ + joined +
+            " ORDER BY meeting.created_at DESC, meeting.id DESC, segment.start_seconds, segment.id LIMIT ? OFFSET ?",
+            (expression, limit, offset),
+        ).fetchall()
+        return [
+            SearchHit(
+                meeting_id=row["meeting_id"], title=row["title"], speaker=row["speaker"],
+                start=row["start_seconds"], end=row["end_seconds"], text=row["text"],
+            )
+            for row in rows
+        ], total

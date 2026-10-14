@@ -42,3 +42,19 @@ class MeetingDetailResponse(MeetingMetadataResponse):
     vad_segments: list[SpeechSegment]
     diarization_segments: list[SpeakerTurn]
     transcript_segments: list[TranscriptSegment]
+
+
+class SearchHitResponse(BaseModel):
+    meeting_id: str
+    title: str | None
+    speaker: str
+    start: float
+    end: float
+    text: str
+
+
+class MeetingSearchResponse(BaseModel):
+    items: list[SearchHitResponse]
+    total: int
+    limit: int
+    offset: int

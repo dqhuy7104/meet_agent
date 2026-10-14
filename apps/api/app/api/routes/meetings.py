@@ -18,6 +18,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import initialize_meeting_store, open_meeting_db
 from app.schemas.meeting import (
     MeetingAcceptedResponse, MeetingDetailResponse, MeetingListResponse, MeetingMetadataResponse,
+    MeetingSearchResponse, SearchHitResponse,
 )
 from app.services.meetings.repository import (
     IdempotencyConflict, MeetingRecord, MeetingRepository, MeetingStateConflict,
@@ -127,6 +128,23 @@ async def list_meetings(
     return MeetingListResponse(
         items=[_metadata(record) for record in repository.list_meetings(limit, offset)],
         total=repository.count_meetings(), limit=limit, offset=offset,
+    )
+
+
+@router.get("/search", response_model=MeetingSearchResponse)
+async def search_meetings(
+    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+    q: Annotated[str, Query(min_length=1, max_length=200)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> MeetingSearchResponse:
+    """Search completed meeting transcripts using plain text."""
+    if not q.strip():
+        raise HTTPException(status_code=422, detail="Search query must not be blank")
+    hits, total = repository.search_segments(q, limit, offset)
+    return MeetingSearchResponse(
+        items=[SearchHitResponse(**hit.__dict__) for hit in hits],
+        total=total, limit=limit, offset=offset,
     )
 
 
