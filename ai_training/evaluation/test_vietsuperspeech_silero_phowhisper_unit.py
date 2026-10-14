@@ -77,15 +77,16 @@ class VietSuperSpeechRoutingTest(unittest.TestCase):
         environment.pop("PYTHONPATH", None)
 
         result = subprocess.run(
-            [sys.executable, str(script), "--help"],
+            [sys.executable, str(script), "--dataset-root", "/missing-vietsuperspeech"],
             capture_output=True,
             text=True,
             env=environment,
             check=False,
         )
 
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("--dataset-root", result.stdout)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("VietSuperSpeech manifest does not exist", result.stderr)
+        self.assertNotIn("ModuleNotFoundError", result.stderr)
 
     def test_report_records_flow_and_split_fingerprint(self) -> None:
         with TemporaryDirectory() as directory:

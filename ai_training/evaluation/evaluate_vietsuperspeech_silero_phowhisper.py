@@ -32,6 +32,12 @@ DEFAULT_DATASET_ROOT = Path("ai_training/datasets/processed/Vietsuperspeech/Viet
 DEFAULT_OUTPUT = Path("ai_training/results/vietsuperspeech_routed_asr_results.json")
 
 
+def _add_api_to_import_path() -> None:
+    api_path = str(Path(__file__).resolve().parents[2] / "apps" / "api")
+    if api_path not in sys.path:
+        sys.path.insert(0, api_path)
+
+
 @dataclass(frozen=True)
 class ManifestSample:
     """One VietSuperSpeech manifest entry with a resolved WAV path."""
@@ -155,6 +161,7 @@ def load_manifest_samples(dataset_root: Path, split: str, limit: int | None) -> 
 
 def prepare_speech_regions(samples: list[ManifestSample], models: AudioModels) -> list[PreparedSample]:
     """Decode with the API's FFmpeg path and keep each VAD region separate."""
+    _add_api_to_import_path()
     from app.services.audio.preprocess import SAMPLE_RATE, decode_audio
     from silero_vad import get_speech_timestamps
 
@@ -218,6 +225,7 @@ def transcribe_prepared_samples(
 
 def main() -> None:
     """Run the API audio-to-ASR stages and write a VietSuperSpeech report."""
+    _add_api_to_import_path()
     from app.core.audio_models import ModelRegistry
     from app.core.config import Settings
 
@@ -284,5 +292,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps" / "api"))
     main()

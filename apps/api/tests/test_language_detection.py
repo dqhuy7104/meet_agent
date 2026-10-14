@@ -15,11 +15,16 @@ class FakeLanguageModel:
     def __init__(self, language_index: int) -> None:
         self.language_index = language_index
         self.input_samples = 0
+        self.requested_outputs: list[str] = []
 
     def get_inputs(self) -> list[SimpleNamespace]:
         return [SimpleNamespace(name="input")]
 
-    def run(self, output_names: object, inputs: dict[str, np.ndarray]) -> list[np.ndarray]:
+    def get_outputs(self) -> list[SimpleNamespace]:
+        return [SimpleNamespace(name="language_logits"), SimpleNamespace(name="unused_fixed_batch_output")]
+
+    def run(self, output_names: list[str], inputs: dict[str, np.ndarray]) -> list[np.ndarray]:
+        self.requested_outputs = output_names
         self.input_samples = inputs["input"].shape[1]
         logits = np.zeros((1, 95), dtype=np.float32)
         logits[0, self.language_index] = 1
@@ -31,6 +36,7 @@ class LanguageDetectionTest(unittest.TestCase):
         model = FakeLanguageModel(45)
         detector = SileroLanguageDetector(model)  # type: ignore[arg-type]
         self.assertEqual(detector(torch.zeros(16_000)), "vi")
+        self.assertEqual(model.requested_outputs, ["language_logits"])
 
     def test_other_language_uses_only_first_twenty_seconds(self) -> None:
         model = FakeLanguageModel(30)

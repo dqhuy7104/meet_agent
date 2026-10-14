@@ -70,7 +70,8 @@ Evaluate the held-out `dev.json` split with the audio API's VAD and language
 routing flow:
 
 ```bash
-uv run ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py --limit 5
+uv run ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py \
+  --dataset-root /path/to/VietSuperSpeech --limit 5
 ```
 
 Each VAD region is classified by Silero Lang 95, then transcribed by
