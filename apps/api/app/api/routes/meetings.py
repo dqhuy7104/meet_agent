@@ -7,14 +7,18 @@ import ipaddress
 import sqlite3
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile, status
+from fastapi.responses import FileResponse
 
 from app.api.routes.audio import MAX_UPLOAD_BYTES
 from app.core.config import Settings, get_settings
 from app.db.session import initialize_meeting_store, open_meeting_db
-from app.schemas.meeting import MeetingAcceptedResponse
+from app.schemas.meeting import (
+    MeetingAcceptedResponse, MeetingDetailResponse, MeetingListResponse, MeetingMetadataResponse,
+)
 from app.services.meetings.repository import (
     IdempotencyConflict, MeetingRecord, MeetingRepository, MeetingStateConflict,
 )
@@ -60,6 +64,15 @@ def _accepted(record: MeetingRecord) -> MeetingAcceptedResponse:
     )
 
 
+def _metadata(record: MeetingRecord) -> MeetingMetadataResponse:
+    return MeetingMetadataResponse(
+        id=record.id, title=record.title, original_filename=record.original_filename,
+        created_at=record.created_at, updated_at=record.updated_at, status=record.status,
+        attempt_count=record.attempt_count, duration_seconds=record.duration_seconds,
+        failure_code=record.failure_code,
+    )
+
+
 @router.post("", response_model=MeetingAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_meeting(
     file: Annotated[UploadFile, File(description="Original meeting audio, up to 25 MiB")],
@@ -102,6 +115,70 @@ async def upload_meeting(
         audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
         raise
     return _accepted(record)
+
+
+@router.get("", response_model=MeetingListResponse)
+async def list_meetings(
+    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> MeetingListResponse:
+    """List stored meetings from newest to oldest."""
+    return MeetingListResponse(
+        items=[_metadata(record) for record in repository.list_meetings(limit, offset)],
+        total=repository.count_meetings(), limit=limit, offset=offset,
+    )
+
+
+@router.get("/{meeting_id}", response_model=MeetingDetailResponse)
+async def get_meeting(
+    meeting_id: str,
+    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+) -> MeetingDetailResponse:
+    """Return metadata and completed transcript results for one meeting."""
+    detail = repository.get_detail(meeting_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    return MeetingDetailResponse(
+        **_metadata(detail.meeting).model_dump(),
+        transcript=detail.meeting.transcript if detail.meeting.status == "completed" else None,
+        vad_segments=detail.vad_segments,
+        diarization_segments=detail.diarization_segments,
+        transcript_segments=detail.transcript_segments,
+    )
+
+
+@router.get("/{meeting_id}/audio", response_class=FileResponse)
+async def get_meeting_audio(
+    meeting_id: str,
+    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+    settings: Annotated[Settings, Depends(get_meeting_settings)],
+) -> FileResponse:
+    """Serve the original audio, including byte range requests."""
+    record = repository.get_meeting(meeting_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    path = audio_path(settings.meeting_data_dir, record.storage_key)
+    if not path.is_file():
+        raise HTTPException(status_code=404, detail="Meeting audio unavailable")
+    filename = Path(record.original_filename.replace("\\", "/")).name
+    return FileResponse(path, filename=filename, media_type="application/octet-stream")
+
+
+@router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_meeting(
+    meeting_id: str,
+    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+    settings: Annotated[Settings, Depends(get_meeting_settings)],
+) -> None:
+    """Delete a non-processing meeting and its original audio."""
+    try:
+        storage_key = repository.delete(meeting_id)
+    except MeetingStateConflict as error:
+        raise HTTPException(status_code=409, detail="Processing meeting cannot be deleted") from error
+    if storage_key is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
+    audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
 
 
 @router.post("/{meeting_id}/retry", response_model=MeetingAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)

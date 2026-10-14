@@ -6,7 +6,7 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
-from app.schemas.transcript import AudioProcessResponse
+from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 
 
 class IdempotencyConflict(ValueError):
@@ -32,6 +32,14 @@ class MeetingRecord:
     duration_seconds: float | None
     failure_code: str | None
     transcript: str | None
+
+
+@dataclass(frozen=True)
+class MeetingDetail:
+    meeting: MeetingRecord
+    vad_segments: list[SpeechSegment]
+    diarization_segments: list[SpeakerTurn]
+    transcript_segments: list[TranscriptSegment]
 
 
 def _record(row: sqlite3.Row) -> MeetingRecord:
@@ -179,3 +187,59 @@ class MeetingRepository:
                 (datetime.now(timezone.utc).isoformat(), meeting_id),
             )
         return self.get_meeting(meeting_id)
+
+    def count_meetings(self) -> int:
+        return self.connection.execute("SELECT count(*) FROM meetings").fetchone()[0]
+
+    def get_detail(self, meeting_id: str) -> MeetingDetail | None:
+        """Read completed results, keeping incomplete states transcript-free."""
+        meeting = self.get_meeting(meeting_id)
+        if meeting is None:
+            return None
+        if meeting.status != "completed":
+            return MeetingDetail(meeting, [], [], [])
+        vad = [
+            SpeechSegment(start=row["start_seconds"], end=row["end_seconds"])
+            for row in self.connection.execute(
+                "SELECT start_seconds, end_seconds FROM vad_segments WHERE meeting_id=? ORDER BY ordinal",
+                (meeting_id,),
+            )
+        ]
+        turns = [
+            SpeakerTurn(start=row["start_seconds"], end=row["end_seconds"], speaker=row["speaker"])
+            for row in self.connection.execute(
+                """SELECT start_seconds, end_seconds, speaker FROM diarization_segments
+                   WHERE meeting_id=? ORDER BY ordinal""",
+                (meeting_id,),
+            )
+        ]
+        transcripts = [
+            TranscriptSegment(
+                start=row["start_seconds"], end=row["end_seconds"],
+                speaker=row["speaker"], text=row["text"],
+            )
+            for row in self.connection.execute(
+                """SELECT start_seconds, end_seconds, speaker, text FROM transcript_segments
+                   WHERE meeting_id=? ORDER BY ordinal""",
+                (meeting_id,),
+            )
+        ]
+        return MeetingDetail(meeting, vad, turns, transcripts)
+
+    def delete(self, meeting_id: str) -> str | None:
+        """Remove database rows atomically and return the audio storage key."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            meeting = self.get_meeting(meeting_id)
+            if meeting is None:
+                self.connection.commit()
+                return None
+            if meeting.status == "processing":
+                raise MeetingStateConflict(meeting_id)
+            self._clear_results(meeting_id)
+            self.connection.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
+            self.connection.commit()
+            return meeting.storage_key
+        except BaseException:
+            self.connection.rollback()
+            raise
