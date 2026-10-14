@@ -15,7 +15,9 @@ from app.api.routes.audio import MAX_UPLOAD_BYTES
 from app.core.config import Settings, get_settings
 from app.db.session import initialize_meeting_store, open_meeting_db
 from app.schemas.meeting import MeetingAcceptedResponse
-from app.services.meetings.repository import IdempotencyConflict, MeetingRecord, MeetingRepository
+from app.services.meetings.repository import (
+    IdempotencyConflict, MeetingRecord, MeetingRepository, MeetingStateConflict,
+)
 from app.services.meetings.storage import audio_path, publish_audio
 
 
@@ -99,4 +101,19 @@ async def upload_meeting(
     except (sqlite3.Error, OSError):
         audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
         raise
+    return _accepted(record)
+
+
+@router.post("/{meeting_id}/retry", response_model=MeetingAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
+async def retry_meeting(
+    meeting_id: str,
+    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+) -> MeetingAcceptedResponse:
+    """Requeue a failed meeting using its existing ID and audio."""
+    try:
+        record = repository.retry(meeting_id)
+    except MeetingStateConflict as error:
+        raise HTTPException(status_code=409, detail="Only failed meetings can be retried") from error
+    if record is None:
+        raise HTTPException(status_code=404, detail="Meeting not found")
     return _accepted(record)

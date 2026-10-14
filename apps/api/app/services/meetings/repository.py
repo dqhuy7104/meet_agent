@@ -6,6 +6,8 @@ import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
+from app.schemas.transcript import AudioProcessResponse
+
 
 class IdempotencyConflict(ValueError):
     """An upload key already belongs to a different meeting."""
@@ -80,3 +82,100 @@ class MeetingRepository:
             "SELECT * FROM meetings ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)
         ).fetchall()
         return [_record(row) for row in rows]
+
+    def claim_next(self) -> MeetingRecord | None:
+        """Claim the oldest queued meeting in one write transaction."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            row = self.connection.execute(
+                "SELECT id FROM meetings WHERE status='queued' ORDER BY created_at, id LIMIT 1"
+            ).fetchone()
+            if row is None:
+                self.connection.commit()
+                return None
+            meeting_id = row["id"]
+            self.connection.execute(
+                """UPDATE meetings SET status='processing', attempt_count=attempt_count+1,
+                   updated_at=? WHERE id=?""",
+                (datetime.now(timezone.utc).isoformat(), meeting_id),
+            )
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        return self.get_meeting(meeting_id)
+
+    def recover_interrupted(self) -> None:
+        """Recover only jobs interrupted before the two-claim limit."""
+        with self.connection:
+            self.connection.execute(
+                """UPDATE meetings SET status=CASE WHEN attempt_count<2 THEN 'queued' ELSE 'failed' END,
+                   failure_code=CASE WHEN attempt_count<2 THEN NULL ELSE 'interrupted' END,
+                   updated_at=? WHERE status='processing'""",
+                (datetime.now(timezone.utc).isoformat(),),
+            )
+
+    def _clear_results(self, meeting_id: str) -> None:
+        self.connection.execute("DELETE FROM transcript_fts WHERE meeting_id=?", (meeting_id,))
+        for table in ("transcript_segments", "diarization_segments", "vad_segments"):
+            self.connection.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
+
+    def complete(self, meeting_id: str, result: AudioProcessResponse) -> None:
+        """Replace all derived rows and publish completion atomically."""
+        with self.connection:
+            self._clear_results(meeting_id)
+            for ordinal, segment in enumerate(result.vad_segments):
+                self.connection.execute(
+                    "INSERT INTO vad_segments VALUES (?, ?, ?, ?)",
+                    (meeting_id, ordinal, segment.start, segment.end),
+                )
+            for ordinal, segment in enumerate(result.diarization_segments):
+                self.connection.execute(
+                    "INSERT INTO diarization_segments VALUES (?, ?, ?, ?, ?)",
+                    (meeting_id, ordinal, segment.start, segment.end, segment.speaker),
+                )
+            for ordinal, segment in enumerate(result.transcript_segments):
+                cursor = self.connection.execute(
+                    """INSERT INTO transcript_segments
+                    (meeting_id, ordinal, start_seconds, end_seconds, speaker, text)
+                    VALUES (?, ?, ?, ?, ?, ?)""",
+                    (meeting_id, ordinal, segment.start, segment.end, segment.speaker, segment.text),
+                )
+                self.connection.execute(
+                    "INSERT INTO transcript_fts (meeting_id, segment_id, text) VALUES (?, ?, ?)",
+                    (meeting_id, cursor.lastrowid, segment.text),
+                )
+            cursor = self.connection.execute(
+                """UPDATE meetings SET status='completed', duration_seconds=?, transcript=?,
+                   failure_code=NULL, updated_at=? WHERE id=? AND status='processing'""",
+                (result.duration_seconds, result.transcript, datetime.now(timezone.utc).isoformat(), meeting_id),
+            )
+            if cursor.rowcount != 1:
+                raise MeetingStateConflict(meeting_id)
+
+    def fail(self, meeting_id: str, failure_code: str) -> None:
+        """Mark processing failure without exposing partial results."""
+        with self.connection:
+            self._clear_results(meeting_id)
+            cursor = self.connection.execute(
+                """UPDATE meetings SET status='failed', failure_code=?, duration_seconds=NULL,
+                   transcript=NULL, updated_at=? WHERE id=? AND status='processing'""",
+                (failure_code, datetime.now(timezone.utc).isoformat(), meeting_id),
+            )
+            if cursor.rowcount != 1:
+                raise MeetingStateConflict(meeting_id)
+
+    def retry(self, meeting_id: str) -> MeetingRecord | None:
+        """Requeue one failed meeting while preserving its ID and audio."""
+        with self.connection:
+            record = self.get_meeting(meeting_id)
+            if record is None:
+                return None
+            if record.status != "failed":
+                raise MeetingStateConflict(meeting_id)
+            self.connection.execute(
+                """UPDATE meetings SET status='queued', attempt_count=0, failure_code=NULL,
+                   transcript=NULL, duration_seconds=NULL, updated_at=? WHERE id=?""",
+                (datetime.now(timezone.utc).isoformat(), meeting_id),
+            )
+        return self.get_meeting(meeting_id)
