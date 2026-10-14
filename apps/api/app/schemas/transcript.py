@@ -19,13 +19,13 @@ class SpeakerTurn(SpeechSegment):
 
 
 class TranscriptSegment(SpeakerTurn):
-    """PhoWhisper transcription assigned to the most overlapping speaker."""
+    """Language-routed transcription assigned to the most overlapping speaker."""
 
     text: str
 
 
 class AudioProcessResponse(BaseModel):
-    """Combined output from VAD, PhoWhisper, and pyannote."""
+    """Combined output from VAD, language-routed ASR, and pyannote."""
 
     filename: str
     duration_seconds: float = Field(ge=0)

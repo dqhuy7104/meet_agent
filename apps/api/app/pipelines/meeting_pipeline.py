@@ -1,4 +1,4 @@
-"""Synchronous VAD, PhoWhisper, and diarization inference orchestration."""
+"""Synchronous VAD, language-routed ASR, and diarization orchestration."""
 
 from __future__ import annotations
 
@@ -14,9 +14,10 @@ from app.services.diarization.pyannote import diarization_turns
 
 
 def process_audio(data: bytes, filename: str, models: ModelRegistry) -> AudioProcessResponse:
-    """Run the three inference stages and retain original-audio timestamps.
+    """Transcribe each speech region and retain original-audio timestamps.
 
-    PhoWhisper transcribes each VAD region independently. A region with multiple
+    Language detection selects PhoWhisper or multilingual Whisper for each VAD
+    region. A region with multiple
     diarized speakers receives the speaker with the most overlap; the complete
     diarization turns remain available in the response.
     """
@@ -39,14 +40,19 @@ def process_audio(data: bytes, filename: str, models: ModelRegistry) -> AudioPro
 
     diarization = models.get_diarization()
     turns = diarization_turns(diarization({"waveform": audio.unsqueeze(0), "sample_rate": SAMPLE_RATE}))
-    asr = models.get_asr()
+    language_detector = models.get_language()
     transcripts: list[TranscriptSegment] = []
     for part in timestamps:
         start_sample, end_sample = part["start"], part["end"]
         clip: np.ndarray = waveform[start_sample:end_sample]
         if clip.size == 0:
             continue
-        prediction = asr({"array": clip, "sampling_rate": SAMPLE_RATE})
+        language = language_detector(torch.from_numpy(clip))
+        asr_input = {"array": clip, "sampling_rate": SAMPLE_RATE}
+        if language == "vi":
+            prediction = models.get_asr()(asr_input)
+        else:
+            prediction = models.get_whisper()(asr_input, generate_kwargs={"task": "transcribe"})
         text = str(prediction["text"]).strip()
         if not text:
             continue

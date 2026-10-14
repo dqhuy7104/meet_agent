@@ -6,6 +6,7 @@ dependencies = [
   "datasets",
   "fastapi",
   "kagglehub",
+  "onnxruntime",
   "pyannote.audio",
   "python-multipart",
   "silero-vad[all]",

@@ -15,11 +15,15 @@ class ModelRegistryTest(unittest.TestCase):
         """Create loaders that record calls and return unique sentinels."""
         self.calls: list[str] = []
         self.vad = object()
+        self.language = object()
         self.asr = object()
+        self.whisper = object()
         self.diarization = object()
         self.loaders = ModelLoaders(
             vad=lambda settings: self._load("vad", self.vad, settings),
+            language=lambda settings: self._load("language", self.language, settings),
             asr=lambda settings: self._load("asr", self.asr, settings),
+            whisper=lambda settings: self._load("whisper", self.whisper, settings),
             diarization=lambda settings: self._load("diarization", self.diarization, settings),
         )
         self.registry = ModelRegistry(Settings(), self.loaders)
@@ -38,9 +42,13 @@ class ModelRegistryTest(unittest.TestCase):
         """Repeated accesses reuse exactly one instance per model role."""
         self.assertIs(self.registry.get_vad(), self.vad)
         self.assertIs(self.registry.get_vad(), self.vad)
+        self.assertIs(self.registry.get_language(), self.language)
+        self.assertIs(self.registry.get_language(), self.language)
         self.assertIs(self.registry.get_asr(), self.asr)
+        self.assertIs(self.registry.get_whisper(), self.whisper)
+        self.assertIs(self.registry.get_whisper(), self.whisper)
         self.assertIs(self.registry.get_diarization(), self.diarization)
-        self.assertEqual(self.calls, ["vad", "asr", "diarization"])
+        self.assertEqual(self.calls, ["vad", "language", "asr", "whisper", "diarization"])
 
     def test_a_failed_load_is_wrapped_and_can_retry(self) -> None:
         """A transient failure must not be cached permanently."""
@@ -54,7 +62,10 @@ class ModelRegistryTest(unittest.TestCase):
                 raise RuntimeError("temporary failure")
             return self.vad
 
-        registry = ModelRegistry(Settings(), ModelLoaders(eventually_loads, self.loaders.asr, self.loaders.diarization))
+        registry = ModelRegistry(
+            Settings(),
+            ModelLoaders(eventually_loads, self.loaders.language, self.loaders.asr, self.loaders.whisper, self.loaders.diarization),
+        )
         with self.assertRaises(ModelLoadError):
             registry.get_vad()
         self.assertIs(registry.get_vad(), self.vad)
@@ -69,12 +80,16 @@ class SettingsTest(unittest.TestCase):
         settings = Settings.from_environment(
             {
                 "PHOWHISPER_MODEL": "vinai/PhoWhisper-small",
+                "WHISPER_MODEL": "openai/whisper-small",
+                "SILERO_LANG95_MODEL": "/models/lang_classifier_95.jit",
                 "PYANNOTE_MODEL": "local-pyannote-pipeline",
                 "MODEL_DEVICE": "cpu",
                 "HUGGINGFACE_TOKEN": "token",
             }
         )
         self.assertEqual(settings.phowhisper_model, "vinai/PhoWhisper-small")
+        self.assertEqual(settings.whisper_model, "openai/whisper-small")
+        self.assertEqual(settings.silero_lang95_model, "/models/lang_classifier_95.jit")
         self.assertEqual(settings.pyannote_model, "local-pyannote-pipeline")
         self.assertEqual(settings.model_device, "cpu")
         self.assertEqual(settings.huggingface_token, "token")

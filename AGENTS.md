@@ -86,9 +86,9 @@ The current API has no worker or persistence layer. If adding either for RAG, de
 | Install Python dependencies | `uv sync` |
 | Start audio API | `PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 0.0.0.0 --port 8000` |
 | API tests (fake models, real FFmpeg decoding) | `PYTHONPATH=apps/api uv run python -m unittest discover -s apps/api/tests -p 'test_*.py'` |
-| Offline evaluation unit tests | `uv run python -m unittest discover -s ai_training/evaluation -p '*_unit.py'` |
+| Offline evaluation unit tests | `PYTHONPATH=apps/api uv run python -m unittest discover -s ai_training/evaluation -p '*_unit.py'` |
 | VIVOS ASR evaluation | `uv run python ai_training/evaluation/test_vivos_silero_phowhisper.py --dataset-root <vivos-directory> --limit 5` |
-| VietSuperSpeech ASR evaluation | `uv run python ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py --dataset-root <dataset-directory> --limit 5` |
+| VietSuperSpeech ASR evaluation | `PYTHONPATH=apps/api uv run python ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py --dataset-root <dataset-directory> --limit 5` |
 | ViYT-Diar VAD/diarization evaluation | `uv run --env-file .env python ai_training/evaluation/test_viyt_vad_pyannote.py --dataset-root <dataset-directory> --limit 5` |
 | Format, lint, type check, web build, service build | No configured commands yet; `Makefile`, `apps/web/package.json`, Dockerfiles, and Compose are placeholders. |
 

@@ -5,8 +5,11 @@ Monorepo for the Meeting AI web client, API, and ML workflows.
 ## Audio processing API
 
 The API accepts an uploaded audio file and returns VAD speech regions,
-PhoWhisper transcription, and pyannote speaker turns. Model weights are loaded
-when the first audio request needs them. FFmpeg must be installed on the host.
+language-routed transcription, and pyannote speaker turns. Silero Lang 95
+classifies each VAD region: Vietnamese uses PhoWhisper; other languages use
+the local multilingual Whisper model selected by `WHISPER_MODEL`. Model weights
+are loaded when the first audio request needs them. FFmpeg must be installed
+on the host.
 
 ```bash
 uv sync
@@ -24,9 +27,14 @@ curl -X POST http://localhost:8000/api/audio/process \
   -F "file=@meeting.wav"
 ```
 
-`transcript_segments` are the VAD regions transcribed by PhoWhisper. Each
+`transcript_segments` are the transcribed VAD regions. Each
 region is assigned to the pyannote speaker with the greatest time overlap;
 `diarization_segments` preserve all speaker turns, including any overlaps.
+The response fields and timestamps are unchanged. Silence skips language
+detection and ASR. Lang 95 uses at most the first 20 seconds of each speech
+region and routes by its top language prediction, so a language switch inside
+one region is not detected. The archived Lang 95 ONNX weights download on first
+use; set `SILERO_LANG95_MODEL` to a local ONNX file to avoid that download.
 
 `.env` is ignored by Git. Shell environment variables take precedence over
 values in `.env`; restart the API after changing model settings. Other scripts
@@ -55,3 +63,23 @@ rates, matching the existing evaluation script. Use `--train-limit` and
 `--dev-limit` for a small trial; those results are not full-dataset metrics.
 Dataset transcripts may be machine-generated, so review labels before relying
 on quality scores.
+
+## VietSuperSpeech ASR evaluation
+
+Evaluate the held-out `dev.json` split with the audio API's VAD and language
+routing flow:
+
+```bash
+PYTHONPATH=apps/api uv run python ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py \
+  --dataset-root /path/to/VietSuperSpeech --limit 5
+```
+
+Each VAD region is classified by Silero Lang 95, then transcribed by
+PhoWhisper for Vietnamese or local multilingual Whisper otherwise. The JSON
+report records per-region routes, WER/CER, inference time, model IDs, and a
+manifest checksum. `--limit` is a smoke test; omit it for the full split.
+Inference time covers language detection and ASR, excluding model loading,
+decoding, and VAD. WER/CER remain means of per-sample error rates.
+`--model`, `--whisper-model`, `--language-model`, and `--device` override the
+corresponding API settings. Add `--env-file .env` after `uv run` to use local
+model settings from `.env`. No diarization is run for this ASR evaluation.

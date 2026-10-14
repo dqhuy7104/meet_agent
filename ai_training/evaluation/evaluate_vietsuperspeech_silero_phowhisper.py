@@ -1,7 +1,7 @@
-"""Evaluate Silero VAD and PhoWhisper on a VietSuperSpeech split.
+"""Evaluate API-style VAD, language routing, and ASR on VietSuperSpeech.
 
 Example:
-    uv run python ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py \
+    PYTHONPATH=apps/api uv run python ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py \
         --dataset-root ai_training/datasets/processed/Vietsuperspeech/VietSuperSpeech \
         --limit 5
 """
@@ -10,33 +10,25 @@ from __future__ import annotations
 
 import argparse
 import json
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
+from hashlib import sha256
+from importlib.metadata import version
 from pathlib import Path
-from typing import Any
+from time import perf_counter
+from typing import Any, Callable, Protocol
+
+import numpy as np
+import torch
 
 try:
-    from ai_training.evaluation.test_vivos_silero_phowhisper import (
-        PreparedSample,
-        SampleResult,
-        effective_batch_size,
-        error_rate,
-        load_asr_pipeline,
-        transcribe_prepared_samples,
-    )
+    from ai_training.evaluation.test_vivos_silero_phowhisper import error_rate
 except ModuleNotFoundError:
     # Permit the documented ``python ai_training/evaluation/...py`` invocation.
-    from test_vivos_silero_phowhisper import (  # type: ignore[no-redef]
-        PreparedSample,
-        SampleResult,
-        effective_batch_size,
-        error_rate,
-        load_asr_pipeline,
-        transcribe_prepared_samples,
-    )
+    from test_vivos_silero_phowhisper import error_rate  # type: ignore[no-redef]
 
 
 DEFAULT_DATASET_ROOT = Path("ai_training/datasets/processed/Vietsuperspeech/VietSuperSpeech")
-DEFAULT_OUTPUT = Path("ai_training/results/vietsuperspeech_phowhisper_results.json")
+DEFAULT_OUTPUT = Path("ai_training/results/vietsuperspeech_routed_asr_results.json")
 
 
 @dataclass(frozen=True)
@@ -47,19 +39,68 @@ class ManifestSample:
     reference: str
 
 
+@dataclass(frozen=True)
+class PreparedSample:
+    """Decoded recording with its original VAD regions kept separate."""
+
+    audio_path: Path
+    reference: str
+    audio_seconds: float
+    speech_seconds: float
+    sampling_rate: int
+    speech_regions: list[np.ndarray]
+
+
+@dataclass(frozen=True)
+class RoutedTranscription:
+    """One recording's transcript and per-region routing decisions."""
+
+    hypothesis: str
+    languages: list[str]
+    asr_routes: list[str]
+    inference_seconds: float
+
+
+@dataclass(frozen=True)
+class RoutedSampleResult:
+    """Metrics and routing details for one VietSuperSpeech recording."""
+
+    audio_path: str
+    reference: str
+    hypothesis: str
+    audio_seconds: float
+    speech_seconds: float
+    inference_seconds: float
+    languages: list[str]
+    asr_routes: list[str]
+    word_error_rate: float
+    character_error_rate: float
+
+
+class AudioModels(Protocol):
+    """Model access used by the API and this offline evaluation."""
+
+    def get_vad(self) -> Any: ...
+
+    def get_language(self) -> Any: ...
+
+    def get_asr(self) -> Any: ...
+
+    def get_whisper(self) -> Any: ...
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line settings for the VietSuperSpeech evaluation."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dataset-root", type=Path, default=DEFAULT_DATASET_ROOT)
     parser.add_argument("--split", choices=("dev", "train"), default="dev")
     parser.add_argument("--limit", type=int, help="Number of manifest entries to evaluate.")
+    parser.add_argument("--model", help="PhoWhisper model ID (default: PHOWHISPER_MODEL setting).")
+    parser.add_argument("--whisper-model", help="Multilingual Whisper model ID (default: WHISPER_MODEL setting).")
     parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=5,
-        help="ASR batch size on CUDA (CPU always uses one item).",
+        "--language-model", help="Silero Lang 95 ONNX URL or path (default: SILERO_LANG95_MODEL setting)."
     )
-    parser.add_argument("--model", default="vinai/PhoWhisper-base", help="Hugging Face model identifier.")
+    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), help="Override MODEL_DEVICE.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Location for the JSON report.")
     return parser.parse_args()
 
@@ -111,60 +152,125 @@ def load_manifest_samples(dataset_root: Path, split: str, limit: int | None) -> 
     return samples
 
 
-def prepare_speech_regions(samples: list[ManifestSample]) -> list[PreparedSample]:
-    """Apply Silero VAD to the manifest samples while preserving their references."""
-    import torch
-    from silero_vad import get_speech_timestamps, load_silero_vad, read_audio
+def prepare_speech_regions(samples: list[ManifestSample], models: AudioModels) -> list[PreparedSample]:
+    """Decode with the API's FFmpeg path and keep each VAD region separate."""
+    from app.services.audio.preprocess import SAMPLE_RATE, decode_audio
+    from silero_vad import get_speech_timestamps
 
-    sampling_rate = 16_000
-    vad_model = load_silero_vad()
+    vad_model = models.get_vad()
     prepared: list[PreparedSample] = []
     for sample in samples:
-        audio = read_audio(str(sample.audio_path), sampling_rate=sampling_rate)
-        timestamps = get_speech_timestamps(audio, vad_model, sampling_rate=sampling_rate)
-        speech_audio = (
-            torch.cat([audio[item["start"] : item["end"]] for item in timestamps]) if timestamps else None
-        )
+        waveform = decode_audio(sample.audio_path.read_bytes())
+        timestamps = get_speech_timestamps(torch.from_numpy(waveform), vad_model, sampling_rate=SAMPLE_RATE)
+        regions = [waveform[item["start"] : item["end"]] for item in timestamps]
+        regions = [region for region in regions if region.size]
         prepared.append(
             PreparedSample(
                 audio_path=sample.audio_path,
                 reference=sample.reference,
-                audio_seconds=len(audio) / sampling_rate,
-                speech_seconds=(len(speech_audio) / sampling_rate if speech_audio is not None else 0.0),
-                speech_audio=(speech_audio.numpy() if speech_audio is not None else None),
+                audio_seconds=len(waveform) / SAMPLE_RATE,
+                speech_seconds=sum(len(region) for region in regions) / SAMPLE_RATE,
+                sampling_rate=SAMPLE_RATE,
+                speech_regions=regions,
             )
         )
     return prepared
 
 
+def transcribe_prepared_samples(
+    samples: list[PreparedSample],
+    models: AudioModels,
+    *,
+    clock: Callable[[], float] = perf_counter,
+) -> list[RoutedTranscription]:
+    """Detect language and transcribe each region using the API's routing rule."""
+    results: list[RoutedTranscription] = []
+    for sample in samples:
+        texts: list[str] = []
+        languages: list[str] = []
+        asr_routes: list[str] = []
+        inference_seconds = 0.0
+        for region in sample.speech_regions:
+            detector = models.get_language()
+            started_at = clock()
+            language = detector(torch.from_numpy(region))
+            inference_seconds += clock() - started_at
+            asr_input = {"array": region, "sampling_rate": sample.sampling_rate}
+            if language == "vi":
+                asr = models.get_asr()
+                asr_routes.append("phowhisper")
+                started_at = clock()
+                prediction = asr(asr_input)
+            else:
+                asr = models.get_whisper()
+                asr_routes.append("whisper")
+                started_at = clock()
+                prediction = asr(asr_input, generate_kwargs={"task": "transcribe"})
+            inference_seconds += clock() - started_at
+            texts.append(str(prediction["text"]).strip())
+            languages.append(language)
+        results.append(
+            RoutedTranscription(" ".join(text for text in texts if text), languages, asr_routes, inference_seconds)
+        )
+    return results
+
+
 def main() -> None:
-    """Run VAD followed by ASR and write a VietSuperSpeech evaluation report."""
+    """Run the API audio-to-ASR stages and write a VietSuperSpeech report."""
+    from app.core.audio_models import ModelRegistry
+    from app.core.config import Settings
+
     args = parse_args()
     samples = load_manifest_samples(args.dataset_root, args.split, args.limit)
-    asr_pipeline, use_cuda = load_asr_pipeline(args.model)
-    batch_size = effective_batch_size(args.batch_size, use_cuda=use_cuda)
-    print(f"ASR device: {'cuda:0' if use_cuda else 'cpu'}; effective batch size: {batch_size}")
-    prepared = prepare_speech_regions(samples)
-    hypotheses, inference_seconds, total_inference_seconds = transcribe_prepared_samples(
-        prepared, asr_pipeline, batch_size
-    )
+    settings = Settings.from_environment()
+    overrides = {
+        key: value
+        for key, value in {
+            "phowhisper_model": args.model,
+            "whisper_model": args.whisper_model,
+            "silero_lang95_model": args.language_model,
+            "model_device": args.device,
+        }.items()
+        if value is not None
+    }
+    settings = replace(settings, **overrides)
+    models = ModelRegistry(settings)
+    prepared = prepare_speech_regions(samples, models)
+    transcriptions = transcribe_prepared_samples(prepared, models)
+    total_inference_seconds = sum(item.inference_seconds for item in transcriptions)
     results = [
-        SampleResult(
+        RoutedSampleResult(
             audio_path=str(sample.audio_path),
             reference=sample.reference,
-            hypothesis=hypothesis,
+            hypothesis=transcription.hypothesis,
             audio_seconds=sample.audio_seconds,
             speech_seconds=sample.speech_seconds,
-            inference_seconds=sample_seconds,
-            word_error_rate=error_rate(sample.reference, hypothesis, character_level=False),
-            character_error_rate=error_rate(sample.reference, hypothesis, character_level=True),
+            inference_seconds=transcription.inference_seconds,
+            languages=transcription.languages,
+            asr_routes=transcription.asr_routes,
+            word_error_rate=error_rate(sample.reference, transcription.hypothesis, character_level=False),
+            character_error_rate=error_rate(sample.reference, transcription.hypothesis, character_level=True),
         )
-        for sample, hypothesis, sample_seconds in zip(prepared, hypotheses, inference_seconds, strict=True)
+        for sample, transcription in zip(prepared, transcriptions, strict=True)
     ]
     report = {
         "dataset_root": str(args.dataset_root),
         "split": args.split,
-        "model": args.model,
+        "manifest_sha256": sha256((args.dataset_root / f"{args.split}.json").read_bytes()).hexdigest(),
+        "sample_count": len(results),
+        "model": settings.phowhisper_model,
+        "whisper_model": settings.whisper_model,
+        "language_model": settings.silero_lang95_model,
+        "model_device": settings.model_device,
+        "asr_device": "cuda:0" if settings.model_device != "cpu" and torch.cuda.is_available() else "cpu",
+        "language_provider": models.get_language().model.get_providers()[0]
+        if any(sample.speech_regions for sample in prepared)
+        else None,
+        "preprocessing": "FFmpeg 16 kHz mono float32; Silero VAD; per-region language routing",
+        "timing_scope": "Language detection and ASR inference; excludes decoding, VAD, and model loading",
+        "dependency_versions": {
+            name: version(name) for name in ("torch", "transformers", "onnxruntime", "silero-vad")
+        },
         "samples": [asdict(result) for result in results],
         "total_inference_seconds": total_inference_seconds,
         "mean_inference_seconds": total_inference_seconds / len(results),
@@ -173,7 +279,7 @@ def main() -> None:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.output.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    print("Report:", json.dumps(report, ensure_ascii=False, indent=2))
+    print(f"Report: {args.output}; samples: {len(results)}; mean WER: {report['mean_wer']:.4f}; mean CER: {report['mean_cer']:.4f}")
 
 
 if __name__ == "__main__":

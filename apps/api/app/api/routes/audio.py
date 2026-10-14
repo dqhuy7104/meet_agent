@@ -35,7 +35,7 @@ async def process_audio_upload(
     file: Annotated[UploadFile, File(description="Audio file supported by FFmpeg (up to 25 MiB, 30 minutes)")],
     models: Annotated[ModelRegistry, Depends(get_models)],
 ) -> AudioProcessResponse:
-    """Run Silero VAD, PhoWhisper ASR, and pyannote diarization on one audio file."""
+    """Run VAD, language-routed ASR, and speaker diarization on one audio file."""
     if file.size is not None and file.size > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Audio file exceeds 25 MiB")
     try:

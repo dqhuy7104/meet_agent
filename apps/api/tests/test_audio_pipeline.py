@@ -6,7 +6,7 @@ import io
 import unittest
 import wave
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import httpx
 from pyannote.core import Annotation, Segment
@@ -58,6 +58,16 @@ class FakeRegistry:
         self.calls.append("asr")
         return self
 
+    def get_language(self) -> object:
+        """Classify test speech as Vietnamese unless overridden."""
+        self.calls.append("language")
+        return lambda audio: "vi"
+
+    def get_whisper(self) -> object:
+        """Return a dummy Whisper pipeline."""
+        self.calls.append("whisper")
+        return lambda audio, **kwargs: {"text": "Hello"}
+
 
 class AudioApiTest(unittest.IsolatedAsyncioTestCase):
     """Verify upload validation and response alignment without real inference."""
@@ -99,8 +109,60 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["vad_segments"], [{"start": 0.0, "end": 1.0}])
         self.assertEqual(body["transcript_segments"][0]["speaker"], "SPEAKER_00")
         self.assertEqual(body["diarization_segments"][0]["speaker"], "SPEAKER_00")
-        self.assertEqual(self.models.calls, ["vad", "diarization"])
+        self.assertEqual(self.models.calls, ["vad", "diarization", "language"])
         asr.assert_called_once()
+
+    async def test_non_vietnamese_region_uses_whisper(self) -> None:
+        whisper_asr = Mock(return_value={"text": "Hello"})
+        with patch(
+            "app.pipelines.meeting_pipeline.get_speech_timestamps",
+            return_value=[{"start": 0, "end": SAMPLE_RATE}],
+        ), patch.object(self.models, "get_language", return_value=lambda audio: "other"), patch.object(
+            self.models, "get_whisper", return_value=whisper_asr
+        ) as whisper, patch.object(self.models, "get_asr") as phowhisper:
+            response = await self.client.post(
+                "/api/audio/process", files={"file": ("sample.wav", _wav_bytes(), "audio/wav")}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["transcript"], "Hello")
+        whisper.assert_called_once()
+        self.assertEqual(whisper_asr.call_args.kwargs, {"generate_kwargs": {"task": "transcribe"}})
+        phowhisper.assert_not_called()
+
+    async def test_mixed_language_regions_use_both_asr_models(self) -> None:
+        languages = iter(["vi", "other"])
+        with patch(
+            "app.pipelines.meeting_pipeline.get_speech_timestamps",
+            return_value=[
+                {"start": 0, "end": SAMPLE_RATE},
+                {"start": SAMPLE_RATE, "end": 2 * SAMPLE_RATE},
+            ],
+        ), patch.object(self.models, "get_language", return_value=lambda audio: next(languages)), patch.object(
+            self.models, "get_asr", return_value=lambda audio: {"text": "Xin chào"}
+        ) as phowhisper, patch.object(
+            self.models, "get_whisper", return_value=lambda audio, **kwargs: {"text": "Hello"}
+        ) as whisper:
+            response = await self.client.post(
+                "/api/audio/process", files={"file": ("sample.wav", _wav_bytes(2.0), "audio/wav")}
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["transcript"], "Xin chào Hello")
+        phowhisper.assert_called_once()
+        whisper.assert_called_once()
+
+    async def test_language_model_load_failure_returns_503(self) -> None:
+        with patch(
+            "app.pipelines.meeting_pipeline.get_speech_timestamps",
+            return_value=[{"start": 0, "end": SAMPLE_RATE}],
+        ), patch.object(
+            self.models, "get_language",
+            side_effect=ModelLoadError("language", "silero-lang95", RuntimeError("unavailable")),
+        ):
+            response = await self.client.post(
+                "/api/audio/process", files={"file": ("sample.wav", _wav_bytes(), "audio/wav")}
+            )
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["detail"], "language model unavailable")
 
     async def test_silence_skips_asr_and_diarization(self) -> None:
         """A no-speech VAD result should avoid loading the larger models."""
