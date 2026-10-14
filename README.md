@@ -53,11 +53,13 @@ On a POSIX host, start the API and one worker in separate terminals:
 
 ```bash
 uv sync
-PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000
+PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
 PYTHONPATH=apps/api uv run --env-file .env python -m app.services.meetings.worker
 ```
 
-The new `/api/meetings` routes accept loopback clients only. The original
+The new `/api/meetings` routes require a loopback client and local Host; browser
+write requests also require a matching Origin. Keep access logging disabled to
+avoid recording private search queries. The original
 `POST /api/audio/process` still returns an immediate response and stores
 nothing. The library API provides:
 

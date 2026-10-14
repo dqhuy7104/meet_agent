@@ -98,6 +98,7 @@ class MeetingSearchTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(response.json()["items"], [])
         self.assertEqual((await self.client.get("/api/meetings/search", params={"q": " "})).status_code, 422)
         self.assertEqual((await self.client.get("/api/meetings/search", params={"q": "x" * 201})).status_code, 422)
+        self.assertEqual((await self.client.get("/api/meetings/search", params={"q": "abc\x00def"})).status_code, 422)
 
     async def test_pagination_is_stable(self) -> None:
         meeting_id = await self._upload()

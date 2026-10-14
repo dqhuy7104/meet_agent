@@ -23,17 +23,29 @@ from app.schemas.meeting import (
 from app.services.meetings.repository import (
     IdempotencyConflict, MeetingRecord, MeetingRepository, MeetingStateConflict,
 )
-from app.services.meetings.storage import audio_path, publish_audio
+from app.services.meetings.storage import audio_path, audio_publication_lock, publish_audio
 
 
 async def require_loopback(request: Request) -> None:
-    """Reject clients whose actual connection peer is not loopback."""
+    """Restrict meeting access to the same local browser origin and peer."""
     try:
         is_local = ipaddress.ip_address(request.client.host).is_loopback if request.client else False
     except ValueError:
         is_local = False
     if not is_local:
         raise HTTPException(status_code=403, detail="Meeting library is available only on loopback")
+    host = request.url.hostname
+    try:
+        is_local_host = host == "localhost" or ipaddress.ip_address(host or "").is_loopback
+    except ValueError:
+        is_local_host = False
+    if not is_local_host:
+        raise HTTPException(status_code=403, detail="Meeting library requires a local Host")
+    origin = request.headers.get("origin")
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and origin:
+        expected_origin = f"{request.url.scheme}://{request.headers['host']}"
+        if origin != expected_origin:
+            raise HTTPException(status_code=403, detail="Meeting library requires a matching Origin")
 
 
 router = APIRouter(prefix="/meetings", tags=["meetings"], dependencies=[Depends(require_loopback)])
@@ -59,7 +71,7 @@ def _accepted(record: MeetingRecord) -> MeetingAcceptedResponse:
         meeting_id=record.id,
         title=record.title,
         original_filename=record.original_filename,
-        status="queued",
+        status=record.status,
         created_at=record.created_at,
         updated_at=record.updated_at,
     )
@@ -93,6 +105,8 @@ async def upload_meeting(
         raise HTTPException(status_code=400, detail="Audio file is empty")
     if len(data) > MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413, detail="Audio file exceeds 25 MiB")
+    if idempotency_key == "":
+        raise HTTPException(status_code=422, detail="Idempotency-Key must not be empty")
     checksum = hashlib.sha256(data).hexdigest()
     if idempotency_key:
         existing = repository.find_by_idempotency_key(idempotency_key)
@@ -101,20 +115,21 @@ async def upload_meeting(
                 raise HTTPException(status_code=409, detail="Idempotency key belongs to different audio")
             return _accepted(existing)
 
-    storage_key = publish_audio(settings.meeting_data_dir, data)
-    try:
-        record = repository.create_meeting(
-            uuid.uuid4().hex, title, file.filename or "audio", storage_key, checksum, idempotency_key
-        )
-    except IdempotencyConflict as error:
-        audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
-        existing = repository.find_by_idempotency_key(idempotency_key)
-        if existing and existing.checksum == checksum:
-            return _accepted(existing)
-        raise HTTPException(status_code=409, detail="Idempotency key belongs to different audio") from error
-    except (sqlite3.Error, OSError):
-        audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
-        raise
+    with audio_publication_lock(settings.meeting_data_dir):
+        storage_key = publish_audio(settings.meeting_data_dir, data)
+        try:
+            record = repository.create_meeting(
+                uuid.uuid4().hex, title, file.filename or "audio", storage_key, checksum, idempotency_key
+            )
+        except IdempotencyConflict as error:
+            audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
+            existing = repository.find_by_idempotency_key(idempotency_key)
+            if existing and existing.checksum == checksum:
+                return _accepted(existing)
+            raise HTTPException(status_code=409, detail="Idempotency key belongs to different audio") from error
+        except (sqlite3.Error, OSError):
+            audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
+            raise
     return _accepted(record)
 
 
@@ -141,6 +156,8 @@ async def search_meetings(
     """Search completed meeting transcripts using plain text."""
     if not q.strip():
         raise HTTPException(status_code=422, detail="Search query must not be blank")
+    if "\x00" in q:
+        raise HTTPException(status_code=422, detail="Search query must not contain NUL")
     hits, total = repository.search_segments(q, limit, offset)
     return MeetingSearchResponse(
         items=[SearchHitResponse(**hit.__dict__) for hit in hits],

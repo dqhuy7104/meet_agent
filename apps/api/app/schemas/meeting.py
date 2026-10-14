@@ -13,7 +13,7 @@ class MeetingAcceptedResponse(BaseModel):
     meeting_id: str
     title: str | None
     original_filename: str
-    status: Literal["queued"]
+    status: Literal["queued", "processing", "completed", "failed"]
     created_at: str
     updated_at: str
 

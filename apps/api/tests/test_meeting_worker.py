@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -128,6 +129,59 @@ class MeetingWorkerTest(unittest.TestCase):
         with self.assertRaises(MeetingStateConflict):
             self.repository.retry("m1")
         self.assertIsNone(self.repository.retry("missing"))
+
+    def test_retry_serializes_with_another_retry_and_claim(self) -> None:
+        self.repository.claim_next()
+        self.repository.fail("m1", "processing_error")
+        first_read = threading.Event()
+        release_first = threading.Event()
+        second_done = threading.Event()
+        outcomes: list[str] = []
+
+        def first_retry() -> None:
+            connection = open_meeting_db(self.data_dir)
+            try:
+                repository = MeetingRepository(connection)
+                original_get = repository.get_meeting
+
+                def paused_get(meeting_id: str):
+                    record = original_get(meeting_id)
+                    first_read.set()
+                    release_first.wait(2)
+                    return record
+
+                with patch.object(repository, "get_meeting", paused_get):
+                    repository.retry("m1")
+            finally:
+                connection.close()
+
+        def second_retry_and_claim() -> None:
+            connection = open_meeting_db(self.data_dir)
+            try:
+                repository = MeetingRepository(connection)
+                try:
+                    repository.retry("m1")
+                    repository.claim_next()
+                    outcomes.append("claimed")
+                except MeetingStateConflict:
+                    outcomes.append("conflict")
+            finally:
+                second_done.set()
+                connection.close()
+
+        first = threading.Thread(target=first_retry, daemon=True)
+        second = threading.Thread(target=second_retry_and_claim, daemon=True)
+        first.start()
+        try:
+            self.assertTrue(first_read.wait(1))
+            second.start()
+            self.assertFalse(second_done.wait(0.1))
+        finally:
+            release_first.set()
+            first.join(timeout=2)
+            if second.ident is not None:
+                second.join(timeout=2)
+        self.assertEqual(outcomes, ["conflict"])
 
 
 class RetryRouteTest(unittest.IsolatedAsyncioTestCase):

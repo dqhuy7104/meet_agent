@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import sqlite3
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -37,7 +38,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         app.dependency_overrides.clear()
 
     async def _upload(self, data: bytes, *, title: str | None = None, key: str | None = None) -> httpx.Response:
-        headers = {"Idempotency-Key": key} if key else {}
+        headers = {"Idempotency-Key": key} if key is not None else {}
         form = {"title": title} if title else {}
         return await self.client.post(
             "/api/meetings", files={"file": ("private.wav", data, "audio/wav")}, data=form, headers=headers
@@ -79,6 +80,62 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         second = await self._upload(b"different", key="request-1")
         self.assertEqual(second.status_code, 409)
 
+    async def test_replay_reports_current_completed_status(self) -> None:
+        first = await self._upload(b"audio", key="request-1")
+        meeting_id = first.json()["meeting_id"]
+        connection = open_meeting_db(self.data_dir)
+        try:
+            repository = MeetingRepository(connection)
+            repository.claim_next()
+            repository.complete(meeting_id, AudioProcessResponse(
+                filename="private.wav", duration_seconds=1.0, transcript="done",
+                vad_segments=[], diarization_segments=[], transcript_segments=[],
+            ))
+        finally:
+            connection.close()
+        replay = await self._upload(b"audio", key="request-1")
+        self.assertEqual(replay.status_code, 202)
+        self.assertEqual(replay.json()["meeting_id"], meeting_id)
+        self.assertEqual(replay.json()["status"], "completed")
+
+    async def test_empty_idempotency_key_is_rejected(self) -> None:
+        self.assertEqual((await self._upload(b"audio", key="")).status_code, 422)
+
+    async def test_cleanup_waits_for_upload_database_commit(self) -> None:
+        original_create = MeetingRepository.create_meeting
+        cleanup_started = threading.Event()
+        cleanup_done = threading.Event()
+        cleaners: list[threading.Thread] = []
+
+        def create_with_concurrent_cleanup(repository: MeetingRepository, *args: object) -> object:
+            from app.services.meetings.storage import cleanup_orphaned_audio
+
+            def clean() -> None:
+                cleanup_started.set()
+                cleanup_orphaned_audio(self.data_dir)
+                cleanup_done.set()
+
+            cleaner = threading.Thread(target=clean, daemon=True)
+            cleaners.append(cleaner)
+            cleaner.start()
+            self.assertTrue(cleanup_started.wait(1))
+            self.assertFalse(cleanup_done.wait(0.1))
+            return original_create(repository, *args)
+
+        try:
+            with patch.object(MeetingRepository, "create_meeting", create_with_concurrent_cleanup):
+                response = await self._upload(b"audio")
+        finally:
+            for cleaner in cleaners:
+                cleaner.join(timeout=2)
+        self.assertEqual(response.status_code, 202)
+        connection = open_meeting_db(self.data_dir)
+        try:
+            record = MeetingRepository(connection).get_meeting(response.json()["meeting_id"])
+            self.assertTrue((self.data_dir / "audio" / record.storage_key).exists())
+        finally:
+            connection.close()
+
     async def test_without_key_uploads_make_distinct_meetings(self) -> None:
         first = await self._upload(b"same")
         second = await self._upload(b"same")
@@ -104,6 +161,15 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         finally:
             await remote.aclose()
         self.assertEqual(response.status_code, 403)
+
+    async def test_nonlocal_host_and_foreign_origin_are_rejected(self) -> None:
+        hostile_host = await self.client.get("/api/meetings", headers={"Host": "attacker.example"})
+        hostile_origin = await self.client.post(
+            "/api/meetings", files={"file": ("private.wav", b"audio", "audio/wav")},
+            headers={"Origin": "http://attacker.example"},
+        )
+        self.assertEqual(hostile_host.status_code, 403)
+        self.assertEqual(hostile_origin.status_code, 403)
 
     async def test_title_and_idempotency_key_lengths_are_bounded(self) -> None:
         self.assertEqual((await self._upload(b"x", title="t" * 201)).status_code, 422)

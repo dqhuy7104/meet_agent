@@ -185,17 +185,25 @@ class MeetingRepository:
 
     def retry(self, meeting_id: str) -> MeetingRecord | None:
         """Requeue one failed meeting while preserving its ID and audio."""
-        with self.connection:
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
             record = self.get_meeting(meeting_id)
             if record is None:
+                self.connection.commit()
                 return None
             if record.status != "failed":
                 raise MeetingStateConflict(meeting_id)
-            self.connection.execute(
+            cursor = self.connection.execute(
                 """UPDATE meetings SET status='queued', attempt_count=0, failure_code=NULL,
-                   transcript=NULL, duration_seconds=NULL, updated_at=? WHERE id=?""",
+                   transcript=NULL, duration_seconds=NULL, updated_at=? WHERE id=? AND status='failed'""",
                 (datetime.now(timezone.utc).isoformat(), meeting_id),
             )
+            if cursor.rowcount != 1:
+                raise MeetingStateConflict(meeting_id)
+            self.connection.commit()
+        except BaseException:
+            self.connection.rollback()
+            raise
         return self.get_meeting(meeting_id)
 
     def count_meetings(self) -> int:

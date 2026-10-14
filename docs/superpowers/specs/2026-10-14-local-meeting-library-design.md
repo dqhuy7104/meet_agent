@@ -13,7 +13,7 @@ The existing `POST /api/audio/process` response and behavior remain unchanged. T
 - A separate worker process on the same machine claims one queued meeting at a time and calls the existing `process_audio` pipeline. It keeps the model registry alive between jobs. The API process does not run model inference for the new meeting workflow.
 - The worker and API share SQLite and the audio directory. No Redis, external database, provider, or object store is required. The worker holds an exclusive local lock so only one instance runs; job claims are transactional.
 
-The documented launch binds the API to `127.0.0.1`. The new routes reject non-loopback clients. This local-only release has no account login or authorization model and must not be exposed through a network proxy. The data directory is created with owner-only permissions. Audio and transcript contents are not logged.
+The documented launch binds the API to `127.0.0.1` with access logs disabled. The new routes reject non-loopback clients and nonlocal Host values; browser write requests require a matching Origin. This local-only release has no account login or authorization model and must not be exposed through a network proxy. The data directory is created with owner-only permissions. Audio, transcripts, and search queries are not logged.
 
 ## Data model and lifecycle
 
@@ -37,7 +37,7 @@ Data is retained until the caller deletes the meeting. Deletion removes database
 | `POST /api/meetings/{id}/retry` | Requeues only a failed meeting; other states return `409`. |
 | `DELETE /api/meetings/{id}` | Deletes a non-processing meeting and its audio; processing returns `409`. |
 
-An optional `Idempotency-Key` on upload allows a client to safely repeat a request: the same key and audio checksum return the original meeting ID and metadata; reusing the key with different audio returns `409`. Without the header, each upload creates a new meeting. All list and search endpoints have bounded pagination. The search route accepts plain text only, limits query length, and escapes FTS syntax before querying SQLite FTS5. Initial search covers Unicode terms as written, including Vietnamese with accents; accent-free equivalents are not a release requirement.
+An optional `Idempotency-Key` on upload allows a client to safely repeat a request: the same key and audio checksum return the original meeting ID and current metadata, including its current status; reusing the key with different audio returns `409`. Empty keys are rejected with `422`. Without the header, each upload creates a new meeting. All list and search endpoints have bounded pagination. The search route accepts plain text only, rejects NUL, limits query length, and escapes FTS syntax before querying SQLite FTS5. Initial search covers Unicode terms as written, including Vietnamese with accents; accent-free equivalents are not a release requirement.
 
 Responses expose safe failure codes such as `invalid_audio`, `audio_too_long`, and `model_unavailable`, without model tokens, internal paths, stack traces, or recording contents. Server errors do not leave a meeting stuck in `processing`. Paths are resolved only from stored generated keys, never from client filenames.
 
