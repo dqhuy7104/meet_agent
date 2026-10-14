@@ -9,7 +9,11 @@ meeting-data/
 ai_training/datasets/*
 ai_training/results/*
 !ai_training/results/.gitkeep
-docs/
+docs/*
+!docs/superpowers/
+docs/superpowers/*
+!docs/superpowers/specs/
+!docs/superpowers/plans/
 duong/dan/folder/
 
 duong/dan/folder/
