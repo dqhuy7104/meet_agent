@@ -3,6 +3,9 @@
 import argparse
 import io
 import json
+import os
+import subprocess
+import sys
 import unittest
 import wave
 from pathlib import Path
@@ -68,6 +71,22 @@ class VietSuperSpeechManifestTest(unittest.TestCase):
 
 
 class VietSuperSpeechRoutingTest(unittest.TestCase):
+    def test_direct_script_invocation_loads_api_without_pythonpath(self) -> None:
+        script = Path(__file__).with_name("evaluate_vietsuperspeech_silero_phowhisper.py")
+        environment = os.environ.copy()
+        environment.pop("PYTHONPATH", None)
+
+        result = subprocess.run(
+            [sys.executable, str(script), "--help"],
+            capture_output=True,
+            text=True,
+            env=environment,
+            check=False,
+        )
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("--dataset-root", result.stdout)
+
     def test_report_records_flow_and_split_fingerprint(self) -> None:
         with TemporaryDirectory() as directory:
             root = Path(directory)

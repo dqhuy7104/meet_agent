@@ -1,7 +1,7 @@
 """Evaluate API-style VAD, language routing, and ASR on VietSuperSpeech.
 
 Example:
-    PYTHONPATH=apps/api uv run python ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py \
+    uv run ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py \
         --dataset-root ai_training/datasets/processed/Vietsuperspeech/VietSuperSpeech \
         --limit 5
 """
@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict, dataclass, replace
 from hashlib import sha256
 from importlib.metadata import version
@@ -283,4 +284,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "apps" / "api"))
     main()

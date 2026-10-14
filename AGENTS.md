@@ -147,3 +147,5 @@ More-specific instructions should supplement the root rules rather than contradi
 14. Add or update focused tests for changed behavior, including failure cases when they are part of the contract.
 15. Run the relevant formatter, linter, type checks, and tests before considering a change complete.
 16. Keep commits and pull requests narrowly scoped; explain non-obvious design decisions in the change description.
+
+# 14. SUMMARIZE PROJECT
