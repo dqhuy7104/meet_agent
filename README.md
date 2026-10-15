@@ -44,6 +44,45 @@ that need the token can also run through `uv run --env-file .env`, for example:
 uv run --env-file .env python ai_training/evaluation/test_viyt_vad_pyannote.py
 ```
 
+## Local meeting library
+
+The meeting library stores uploaded audio and transcripts on this machine.
+It is single-user, has no login, and must not be exposed through a proxy.
+Set `MEETING_DATA_DIR` in `.env` (default `./meeting-data`). FFmpeg is required.
+On a POSIX host, start the API and one worker in separate terminals:
+
+```bash
+uv sync
+PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+PYTHONPATH=apps/api uv run --env-file .env python -m app.services.meetings.worker
+```
+
+The new `/api/meetings` routes require a loopback client and local Host; browser
+write requests also require a matching Origin. Keep access logging disabled to
+avoid recording private search queries. The original
+`POST /api/audio/process` still returns an immediate response and stores
+nothing. The library API provides:
+
+| Request | Result |
+| --- | --- |
+| `POST /api/meetings` | Multipart `file` and optional `title`; queues audio and returns 202. Optional `Idempotency-Key` safely repeats the same audio. |
+| `GET /api/meetings?limit=20&offset=0` | Newest meetings and processing states. |
+| `GET /api/meetings/{id}` | Metadata and completed transcript, VAD regions, and speaker turns. |
+| `GET /api/meetings/{id}/audio` | Original audio; supports playback byte ranges. |
+| `GET /api/meetings/search?q=...` | Transcript segment matches from completed meetings. |
+| `POST /api/meetings/{id}/retry` | Requeue a failed meeting. |
+| `DELETE /api/meetings/{id}` | Remove a non-processing meeting and its audio. |
+
+Uploads are limited to 25 MiB and decoded audio to 30 minutes. Invalid audio
+or model failure leaves the meeting in `failed` with a safe failure code;
+the original audio remains available for retry or deletion. Results and audio
+remain in `MEETING_DATA_DIR` until deletion. The directory contains a SQLite
+database and private audio files; keep it out of version control and protect
+backups. For a consistent backup, stop both API and worker, then copy the
+entire data directory. To roll back, stop both processes, preserve or export
+that directory, and revert the new meeting routes and schema; the original
+audio processing endpoint remains independent.
+
 ## PhoWhisper fine-tuning
 
 Mount or download VietSuperSpeech so `--dataset-root` contains `train.json`,
