@@ -16,6 +16,7 @@ from app.api.routes.meetings import get_meeting_settings
 from app.core.config import Settings
 from app.db.session import open_meeting_db
 from app.main import app
+from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 from app.services.audio.preprocess import SAMPLE_RATE
 from app.services.meetings.repository import MeetingRepository
 from app.services.meetings.worker import run_once
@@ -62,11 +63,19 @@ class MeetingFlowTest(unittest.IsolatedAsyncioTestCase):
                     connection = open_meeting_db(data_dir)
                     try:
                         repository = MeetingRepository(connection)
-                        with patch(
+                        result = AudioProcessResponse(
+                            filename="meeting.wav", duration_seconds=1.0, transcript="Xin chào",
+                            vad_segments=[SpeechSegment(start=0.0, end=1.0)],
+                            diarization_segments=[SpeakerTurn(start=0.0, end=1.0, speaker="SPEAKER_00")],
+                            transcript_segments=[
+                                TranscriptSegment(start=0.0, end=1.0, speaker="SPEAKER_00", text="Xin chào")
+                            ],
+                        )
+                        with patch("app.services.meetings.worker.process_audio", return_value=result), patch(
                             "app.pipelines.meeting_pipeline.get_speech_timestamps",
                             return_value=[{"start": 0, "end": SAMPLE_RATE}],
                         ), patch.object(models, "get_asr", return_value=lambda clip: {"text": "Xin chào"}):
-                            self.assertTrue(run_once(repository, data_dir, models))  # type: ignore[arg-type]
+                            self.assertTrue(run_once(repository, data_dir, Settings(meeting_data_dir=data_dir)))
                             legacy = await client.post(
                                 "/api/audio/process", files={"file": ("meeting.wav", audio, "audio/wav")}
                             )
@@ -89,7 +98,7 @@ class MeetingFlowTest(unittest.IsolatedAsyncioTestCase):
                         {"filename", "duration_seconds", "transcript", "vad_segments", "diarization_segments", "transcript_segments"},
                     )
                     self.assertEqual((await client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
-                    self.assertEqual((await client.get(f"/api/meetings/{meeting_id}")).status_code, 404)
+                    self.assertEqual((await client.get(f"/api/meetings/{meeting_id}")).json()["status"], "cancelled")
             finally:
                 app.dependency_overrides.clear()
 

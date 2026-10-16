@@ -149,3 +149,7 @@ More-specific instructions should supplement the root rules rather than contradi
 16. Keep commits and pull requests narrowly scoped; explain non-obvious design decisions in the change description.
 
 # 14. SUMMARIZE PROJECT
+
+Meeting AI is a Python monorepo for extracting speech and speaker information from meeting audio. Its working FastAPI endpoint, `/api/audio/process`, validates an upload, decodes it with FFmpeg, finds speech with Silero VAD, routes each speech region by Silero Lang 95 to PhoWhisper or multilingual Whisper, and returns transcript segments with pyannote speaker turns. Models load lazily and are reused within each API process; this endpoint does not store audio or transcripts.
+
+`ai_training` contains dataset, training, and offline evaluation scripts for ASR and diarization. The web client, storage, workers, and meeting search/chat RAG stages remain scaffolds or proposals in `pipeline.md`. Keep changes within the implemented flow unless a new stage is explicitly requested, and use the tests and commands above to verify the affected behavior.

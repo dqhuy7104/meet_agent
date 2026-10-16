@@ -9,6 +9,7 @@ import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile, status
 from fastapi.responses import FileResponse
@@ -24,6 +25,18 @@ from app.services.meetings.repository import (
     IdempotencyConflict, MeetingRecord, MeetingRepository, MeetingStateConflict,
 )
 from app.services.meetings.storage import audio_path, audio_publication_lock, publish_audio
+from app.services.meetings.worker import terminate_process
+
+
+def is_local_origin(origin: str) -> bool:
+    """Return whether an Origin header identifies a local HTTP web application."""
+    try:
+        parsed = urlsplit(origin)
+        return parsed.scheme == "http" and (
+            parsed.hostname == "localhost" or ipaddress.ip_address(parsed.hostname or "").is_loopback
+        )
+    except ValueError:
+        return False
 
 
 async def require_loopback(request: Request) -> None:
@@ -42,10 +55,8 @@ async def require_loopback(request: Request) -> None:
     if not is_local_host:
         raise HTTPException(status_code=403, detail="Meeting library requires a local Host")
     origin = request.headers.get("origin")
-    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and origin:
-        expected_origin = f"{request.url.scheme}://{request.headers['host']}"
-        if origin != expected_origin:
-            raise HTTPException(status_code=403, detail="Meeting library requires a matching Origin")
+    if request.method in {"POST", "PUT", "PATCH", "DELETE"} and origin and not is_local_origin(origin):
+        raise HTTPException(status_code=403, detail="Meeting library requires a local Origin")
 
 
 router = APIRouter(prefix="/meetings", tags=["meetings"], dependencies=[Depends(require_loopback)])
@@ -82,7 +93,7 @@ def _metadata(record: MeetingRecord) -> MeetingMetadataResponse:
         id=record.id, title=record.title, original_filename=record.original_filename,
         created_at=record.created_at, updated_at=record.updated_at, status=record.status,
         attempt_count=record.attempt_count, duration_seconds=record.duration_seconds,
-        failure_code=record.failure_code,
+        failure_code=record.failure_code, pipeline_pid=record.pipeline_pid,
     )
 
 
@@ -206,14 +217,13 @@ async def delete_meeting(
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
 ) -> None:
-    """Delete a non-processing meeting and its original audio."""
-    try:
-        storage_key = repository.delete(meeting_id)
-    except MeetingStateConflict as error:
-        raise HTTPException(status_code=409, detail="Processing meeting cannot be deleted") from error
-    if storage_key is None:
+    """Cancel a meeting, remove its audio, and retain only metadata."""
+    cancelled = repository.cancel(meeting_id)
+    if cancelled is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
+    audio_path(settings.meeting_data_dir, cancelled.storage_key).unlink(missing_ok=True)
+    if cancelled.pipeline_pid is not None and cancelled.pipeline_start_ticks is not None:
+        terminate_process(cancelled.pipeline_pid, cancelled.pipeline_start_ticks)
 
 
 @router.post("/{meeting_id}/retry", response_model=MeetingAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)

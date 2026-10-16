@@ -46,6 +46,26 @@ uv run --env-file .env python ai_training/evaluation/test_viyt_vad_pyannote.py
 
 ## Local meeting library
 
+## Web client
+
+The frontend in `apps/web` is a React/Vite client for the local meeting
+library. It displays only data returned by the local meeting API: uploaded
+meetings, processing state, original audio, transcript segments, and speaker
+turns. Upload uses the local `POST /api/meetings` endpoint when the API is
+running.
+
+```bash
+cd apps/web
+npm install
+npm run dev
+```
+
+Open the URL printed by Vite (normally `http://localhost:5173/app/`). For a
+For a production bundle run `npm run build`. Vite proxies `/api` to the local
+API while developing, so the typed client can use the local meeting routes.
+`dist/` is generated and not source data. The client does not place audio or
+transcript content in browser storage.
+
 The meeting library stores uploaded audio and transcripts on this machine.
 It is single-user, has no login, and must not be exposed through a proxy.
 Set `MEETING_DATA_DIR` in `.env` (default `./meeting-data`). FFmpeg is required.
@@ -58,8 +78,9 @@ PYTHONPATH=apps/api uv run --env-file .env python -m app.services.meetings.worke
 ```
 
 The new `/api/meetings` routes require a loopback client and local Host; browser
-write requests also require a matching Origin. Keep access logging disabled to
-avoid recording private search queries. The original
+write requests also require an HTTP origin on the local machine. This supports
+the Vite development proxy while rejecting non-local web origins. Keep access
+logging disabled to avoid recording private search queries. The original
 `POST /api/audio/process` still returns an immediate response and stores
 nothing. The library API provides:
 
@@ -71,12 +92,15 @@ nothing. The library API provides:
 | `GET /api/meetings/{id}/audio` | Original audio; supports playback byte ranges. |
 | `GET /api/meetings/search?q=...` | Transcript segment matches from completed meetings. |
 | `POST /api/meetings/{id}/retry` | Requeue a failed meeting. |
-| `DELETE /api/meetings/{id}` | Remove a non-processing meeting and its audio. |
+| `DELETE /api/meetings/{id}` | Cancel any meeting, including a running pipeline; retain metadata and remove audio. |
 
 Uploads are limited to 25 MiB and decoded audio to 30 minutes. Invalid audio
 or model failure leaves the meeting in `failed` with a safe failure code;
-the original audio remains available for retry or deletion. Results and audio
-remain in `MEETING_DATA_DIR` until deletion. The directory contains a SQLite
+the original audio remains available for retry or deletion. Deleting a running
+meeting returns immediately, terminates its dedicated inference process, marks
+the record `cancelled`, and retains filename/PID metadata while permanently
+removing audio and derived results. Results and audio remain in `MEETING_DATA_DIR`
+until deletion. The directory contains a SQLite
 database and private audio files; keep it out of version control and protect
 backups. For a consistent backup, stop both API and worker, then copy the
 entire data directory. To roll back, stop both processes, preserve or export

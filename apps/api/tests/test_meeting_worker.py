@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -20,7 +21,7 @@ from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegm
 from app.services.audio.preprocess import AudioTooLongError, InvalidAudioError
 from app.services.meetings.repository import MeetingRepository, MeetingStateConflict
 from app.services.meetings.storage import publish_audio
-from app.services.meetings.worker import exclusive_worker_lock, run_once
+from app.services.meetings.worker import exclusive_worker_lock, process_start_ticks, run_once, terminate_process
 
 
 def _result(text: str = "Xin chào") -> AudioProcessResponse:
@@ -41,6 +42,7 @@ class MeetingWorkerTest(unittest.TestCase):
         self.connection = open_meeting_db(self.data_dir)
         self.addCleanup(self.connection.close)
         self.repository = MeetingRepository(self.connection)
+        self.settings = Settings(meeting_data_dir=self.data_dir)
         self.add_meeting()
 
     def add_meeting(self, meeting_id: str = "m1") -> None:
@@ -76,9 +78,20 @@ class MeetingWorkerTest(unittest.TestCase):
                 with exclusive_worker_lock(self.data_dir):
                     pass
 
+    def test_termination_requires_matching_process_identity(self) -> None:
+        child = subprocess.Popen(["sleep", "30"])
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        start_ticks = process_start_ticks(child.pid)
+        self.assertIsNotNone(start_ticks)
+
+        self.assertFalse(terminate_process(child.pid, start_ticks + 1))
+        self.assertIsNone(child.poll())
+        self.assertTrue(terminate_process(child.pid, start_ticks))
+        child.wait(timeout=2)
+
     def test_worker_completes_all_result_rows(self) -> None:
         with patch("app.services.meetings.worker.process_audio", return_value=_result()):
-            self.assertTrue(run_once(self.repository, self.data_dir, object()))
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
         record = self.repository.get_meeting("m1")
         self.assertEqual(record.status, "completed")
         self.assertEqual(record.duration_seconds, 1.0)
@@ -88,7 +101,7 @@ class MeetingWorkerTest(unittest.TestCase):
         self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_fts").fetchone()[0], 1)
         self.assertIsNone(self.repository.claim_next())
-        self.assertFalse(run_once(self.repository, self.data_dir, object()))
+        self.assertFalse(run_once(self.repository, self.data_dir, self.settings))
 
     def test_worker_maps_known_and_unknown_failures_to_safe_codes(self) -> None:
         failures = [
@@ -102,7 +115,7 @@ class MeetingWorkerTest(unittest.TestCase):
                 self.connection.execute("UPDATE meetings SET status='queued', attempt_count=0, failure_code=NULL")
                 self.connection.commit()
                 with patch("app.services.meetings.worker.process_audio", side_effect=error):
-                    self.assertTrue(run_once(self.repository, self.data_dir, object()))
+                    self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
                 record = self.repository.get_meeting("m1")
                 self.assertEqual(record.status, "failed")
                 self.assertEqual(record.failure_code, code)
@@ -121,7 +134,7 @@ class MeetingWorkerTest(unittest.TestCase):
         self.assertEqual(retry.attempt_count, 0)
         self.assertIsNone(retry.failure_code)
         with patch("app.services.meetings.worker.process_audio", return_value=_result("New words")):
-            self.assertTrue(run_once(self.repository, self.data_dir, object()))
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
         texts = [row[0] for row in self.connection.execute("SELECT text FROM transcript_segments")]
         indexed = [row[0] for row in self.connection.execute("SELECT text FROM transcript_fts")]
         self.assertEqual(texts, ["New words"])

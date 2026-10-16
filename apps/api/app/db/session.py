@@ -7,6 +7,53 @@ import sqlite3
 from pathlib import Path
 
 
+def _create_meetings_table(connection: sqlite3.Connection, table_name: str) -> None:
+    connection.execute(
+        f"""CREATE TABLE {table_name} (
+            id TEXT PRIMARY KEY,
+            title TEXT,
+            original_filename TEXT NOT NULL,
+            storage_key TEXT NOT NULL UNIQUE,
+            checksum TEXT NOT NULL,
+            idempotency_key TEXT UNIQUE,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed', 'cancelled')),
+            attempt_count INTEGER NOT NULL DEFAULT 0,
+            duration_seconds REAL,
+            failure_code TEXT,
+            transcript TEXT,
+            pipeline_pid INTEGER,
+            pipeline_start_ticks INTEGER,
+            cancelled_at TEXT
+        )"""
+    )
+
+
+def _migrate_meetings_table(connection: sqlite3.Connection) -> None:
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(meetings)")}
+    required_columns = {"pipeline_pid", "pipeline_start_ticks", "cancelled_at"}
+    if required_columns.issubset(columns):
+        return
+    connection.execute("PRAGMA foreign_keys = OFF")
+    try:
+        with connection:
+            _create_meetings_table(connection, "meetings_migrated")
+            connection.execute(
+                """INSERT INTO meetings_migrated
+                (id, title, original_filename, storage_key, checksum, idempotency_key,
+                 created_at, updated_at, status, attempt_count, duration_seconds, failure_code, transcript)
+                SELECT id, title, original_filename, storage_key, checksum, idempotency_key,
+                       created_at, updated_at, status, attempt_count, duration_seconds, failure_code, transcript
+                FROM meetings"""
+            )
+            connection.execute("DROP TABLE meetings")
+            connection.execute("ALTER TABLE meetings_migrated RENAME TO meetings")
+            connection.execute("CREATE INDEX IF NOT EXISTS meetings_created ON meetings(created_at DESC, id DESC)")
+    finally:
+        connection.execute("PRAGMA foreign_keys = ON")
+
+
 def open_meeting_db(data_dir: Path) -> sqlite3.Connection:
     """Open one configured connection to the local meeting database."""
     connection = sqlite3.connect(data_dir / "meetings.sqlite3", timeout=30)
@@ -34,11 +81,14 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 idempotency_key TEXT UNIQUE,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed')),
+                status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed', 'cancelled')),
                 attempt_count INTEGER NOT NULL DEFAULT 0,
                 duration_seconds REAL,
                 failure_code TEXT,
-                transcript TEXT
+                transcript TEXT,
+                pipeline_pid INTEGER,
+                pipeline_start_ticks INTEGER,
+                cancelled_at TEXT
             );
             CREATE TABLE IF NOT EXISTS vad_segments (
                 meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
@@ -71,6 +121,7 @@ def initialize_meeting_store(data_dir: Path) -> None:
             CREATE INDEX IF NOT EXISTS meetings_created ON meetings(created_at DESC, id DESC);
             """
         )
+        _migrate_meetings_table(connection)
         connection.commit()
     finally:
         connection.close()

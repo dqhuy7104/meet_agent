@@ -13,7 +13,7 @@ class MeetingAcceptedResponse(BaseModel):
     meeting_id: str
     title: str | None
     original_filename: str
-    status: Literal["queued", "processing", "completed", "failed"]
+    status: Literal["queued", "processing", "completed", "failed", "cancelled"]
     created_at: str
     updated_at: str
 
@@ -24,10 +24,11 @@ class MeetingMetadataResponse(BaseModel):
     original_filename: str
     created_at: str
     updated_at: str
-    status: Literal["queued", "processing", "completed", "failed"]
+    status: Literal["queued", "processing", "completed", "failed", "cancelled"]
     attempt_count: int
     duration_seconds: float | None
     failure_code: str | None
+    pipeline_pid: int | None
 
 
 class MeetingListResponse(BaseModel):

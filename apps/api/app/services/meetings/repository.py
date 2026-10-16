@@ -18,6 +18,15 @@ class MeetingStateConflict(ValueError):
 
 
 @dataclass(frozen=True)
+class CancelledMeeting:
+    """Audio and process metadata retained after a cancellation."""
+
+    storage_key: str
+    pipeline_pid: int | None
+    pipeline_start_ticks: int | None
+
+
+@dataclass(frozen=True)
 class MeetingRecord:
     id: str
     title: str | None
@@ -32,6 +41,9 @@ class MeetingRecord:
     duration_seconds: float | None
     failure_code: str | None
     transcript: str | None
+    pipeline_pid: int | None
+    pipeline_start_ticks: int | None
+    cancelled_at: str | None
 
 
 @dataclass(frozen=True)
@@ -141,6 +153,9 @@ class MeetingRepository:
     def complete(self, meeting_id: str, result: AudioProcessResponse) -> None:
         """Replace all derived rows and publish completion atomically."""
         with self.connection:
+            meeting = self.get_meeting(meeting_id)
+            if meeting is None or meeting.status != "processing":
+                return
             self._clear_results(meeting_id)
             for ordinal, segment in enumerate(result.vad_segments):
                 self.connection.execute(
@@ -169,11 +184,14 @@ class MeetingRepository:
                 (result.duration_seconds, result.transcript, datetime.now(timezone.utc).isoformat(), meeting_id),
             )
             if cursor.rowcount != 1:
-                raise MeetingStateConflict(meeting_id)
+                return
 
     def fail(self, meeting_id: str, failure_code: str) -> None:
         """Mark processing failure without exposing partial results."""
         with self.connection:
+            meeting = self.get_meeting(meeting_id)
+            if meeting is None or meeting.status != "processing":
+                return
             self._clear_results(meeting_id)
             cursor = self.connection.execute(
                 """UPDATE meetings SET status='failed', failure_code=?, duration_seconds=NULL,
@@ -181,7 +199,43 @@ class MeetingRepository:
                 (failure_code, datetime.now(timezone.utc).isoformat(), meeting_id),
             )
             if cursor.rowcount != 1:
-                raise MeetingStateConflict(meeting_id)
+                return
+
+    def set_pipeline_process(self, meeting_id: str, pid: int, start_ticks: int) -> bool:
+        """Record the dedicated child process only while the job is running."""
+        with self.connection:
+            cursor = self.connection.execute(
+                """UPDATE meetings SET pipeline_pid=?, pipeline_start_ticks=?, updated_at=?
+                   WHERE id=? AND status='processing'""",
+                (pid, start_ticks, datetime.now(timezone.utc).isoformat(), meeting_id),
+            )
+        return cursor.rowcount == 1
+
+    def cancel(self, meeting_id: str) -> CancelledMeeting | None:
+        """Cancel one meeting while retaining only its audit metadata."""
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            meeting = self.get_meeting(meeting_id)
+            if meeting is None:
+                self.connection.commit()
+                return None
+            cancelled = CancelledMeeting(
+                storage_key=meeting.storage_key,
+                pipeline_pid=meeting.pipeline_pid,
+                pipeline_start_ticks=meeting.pipeline_start_ticks,
+            )
+            if meeting.status != "cancelled":
+                self._clear_results(meeting_id)
+                self.connection.execute(
+                    """UPDATE meetings SET status='cancelled', failure_code=NULL, duration_seconds=NULL,
+                       transcript=NULL, cancelled_at=?, updated_at=? WHERE id=?""",
+                    (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), meeting_id),
+                )
+            self.connection.commit()
+            return cancelled
+        except BaseException:
+            self.connection.rollback()
+            raise
 
     def retry(self, meeting_id: str) -> MeetingRecord | None:
         """Requeue one failed meeting while preserving its ID and audio."""

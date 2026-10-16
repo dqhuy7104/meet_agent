@@ -171,6 +171,21 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hostile_host.status_code, 403)
         self.assertEqual(hostile_origin.status_code, 403)
 
+    async def test_local_vite_proxy_origin_can_upload(self) -> None:
+        proxied = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 4000)),
+            base_url="http://127.0.0.1:8000",
+        )
+        try:
+            response = await proxied.post(
+                "/api/meetings",
+                files={"file": ("private.wav", b"audio", "audio/wav")},
+                headers={"Origin": "http://localhost:5173"},
+            )
+        finally:
+            await proxied.aclose()
+        self.assertEqual(response.status_code, 202)
+
     async def test_title_and_idempotency_key_lengths_are_bounded(self) -> None:
         self.assertEqual((await self._upload(b"x", title="t" * 201)).status_code, 422)
         self.assertEqual((await self._upload(b"x", key="k" * 201)).status_code, 422)
@@ -248,19 +263,30 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             key = repository.get_meeting(meeting_id).storage_key
             deleted = await self.client.delete(f"/api/meetings/{meeting_id}")
             self.assertEqual(deleted.status_code, 204)
-            self.assertIsNone(repository.get_meeting(meeting_id))
+            self.assertEqual(repository.get_meeting(meeting_id).status, "cancelled")
             self.assertEqual(connection.execute("SELECT count(*) FROM transcript_fts").fetchone()[0], 0)
             self.assertFalse((self.data_dir / "audio" / key).exists())
-            self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 404)
+            self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
         finally:
             connection.close()
 
-    async def test_processing_meeting_cannot_be_deleted(self) -> None:
+    async def test_processing_meeting_is_cancelled_and_audio_is_removed(self) -> None:
         meeting_id = (await self._upload(b"audio")).json()["meeting_id"]
         connection = open_meeting_db(self.data_dir)
         try:
-            MeetingRepository(connection).claim_next()
-            self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 409)
+            repository = MeetingRepository(connection)
+            record = repository.claim_next()
+            self.assertTrue(repository.set_pipeline_process(meeting_id, 123, 456))
+
+            self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
+            detail = await self.client.get(f"/api/meetings/{meeting_id}")
+            self.assertEqual(detail.json()["status"], "cancelled")
+            self.assertEqual(detail.json()["pipeline_pid"], 123)
+            self.assertIsNone(detail.json()["transcript"])
+            self.assertFalse((self.data_dir / "audio" / record.storage_key).exists())
+            self.assertEqual((await self.client.get(f"/api/meetings/{meeting_id}/audio")).status_code, 404)
+            self.assertEqual((await self.client.post(f"/api/meetings/{meeting_id}/retry")).status_code, 409)
+            self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
         finally:
             connection.close()
 
@@ -276,7 +302,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(failed_detail.json()["transcript"])
             for meeting_id in (queued_id, failed_id):
                 self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
-                self.assertIsNone(repository.get_meeting(meeting_id))
+                self.assertEqual(repository.get_meeting(meeting_id).status, "cancelled")
             self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
         finally:
             connection.close()
