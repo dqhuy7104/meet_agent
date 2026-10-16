@@ -38,6 +38,7 @@ const labels: Record<MeetingStatus, string> = {
   processing: "Đang xử lý",
   queued: "Đang chờ",
   failed: "Cần thử lại",
+  cancelled: "Đã xoá",
 };
 const time = (seconds: number) =>
   `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
@@ -132,8 +133,9 @@ function useMeetingLibrary() {
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
       const page = await meetingApi.list(signal);
-      setItems(page.items);
-      setTotal(page.total);
+      const visibleItems = page.items.filter((meeting) => meeting.status !== "cancelled");
+      setItems(visibleItems);
+      setTotal(visibleItems.length);
       setError("");
     } catch (cause) {
       if (!signal?.aborted)
@@ -149,14 +151,18 @@ function useMeetingLibrary() {
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
-  return { items, total, error, reload: () => void load() };
+  const removeFromLibrary = useCallback((meetingId: string) => {
+    setItems((current) => current?.filter((meeting) => meeting.id !== meetingId) ?? null);
+    setTotal((current) => Math.max(0, current - 1));
+  }, []);
+  return { items, total, error, reload: () => void load(), removeFromLibrary };
 }
 function MeetingRow({
   meeting,
   onRemoved,
 }: {
   meeting: ApiMeeting;
-  onRemoved?: () => void;
+  onRemoved?: (meetingId: string) => void;
 }) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
@@ -166,7 +172,7 @@ function MeetingRow({
     setDeleteError("");
     try {
       await meetingApi.remove(meeting.id);
-      onRemoved?.();
+      onRemoved?.(meeting.id);
     } catch (cause) {
       setDeleteError(cause instanceof ApiError ? cause.message : "Không thể xóa cuộc họp local.");
     } finally {
@@ -180,11 +186,9 @@ function MeetingRow({
         <div><b>{title(meeting)}</b><small>{date(meeting)} · {duration(meeting.duration_seconds)}</small></div>
         <p>{meeting.original_filename}</p><span /><Status status={meeting.status} />
       </NavLink>
-      {meeting.status !== "processing" && (
-        <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting} aria-label={`Xóa ${title(meeting)}`} title={deleteError || "Xóa cuộc họp"}>
-          <Trash2 size={16} /> {isDeleting ? "Đang xóa..." : "Xóa"}
-        </button>
-      )}
+      <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting} aria-label={`Xóa ${title(meeting)}`} title={deleteError || "Xóa cuộc họp"}>
+        <Trash2 size={16} /> {isDeleting ? "Đang xóa..." : "Xóa"}
+      </button>
     </div>
   );
 }
@@ -228,7 +232,7 @@ function Stat({
   );
 }
 function Dashboard() {
-  const { items, total, error, reload } = useMeetingLibrary();
+  const { items, total, error, reload, removeFromLibrary } = useMeetingLibrary();
   if (error)
     return (
       <div className="page">
@@ -298,7 +302,7 @@ function Dashboard() {
         {items.length ? (
           items
             .slice(0, 4)
-            .map((meeting) => <MeetingRow meeting={meeting} key={meeting.id} onRemoved={reload} />)
+            .map((meeting) => <MeetingRow meeting={meeting} key={meeting.id} onRemoved={removeFromLibrary} />)
         ) : (
           <div className="empty">
             <FileAudio />
@@ -423,7 +427,7 @@ function Meetings() {
   const [filter, setFilter] = useState<MeetingStatus | "all">("all");
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
-  const { items, error, reload } = useMeetingLibrary();
+  const { items, error, reload, removeFromLibrary } = useMeetingLibrary();
   const matching =
     items?.filter(
       (meeting) =>
@@ -437,8 +441,7 @@ function Meetings() {
       <section className="title">
         <div>
           <small>THƯ VIỆN</small>
-          <h2>Cuộc họp của bạn</h2>
-          <p>Tải lên và xem lại các bản ghi được xử lý trên máy local.</p>
+          <h2>Cuộc họp của bạn</h2>ok
         </div>
         <button className="primary" onClick={() => setOpen(true)}>
           <Plus />
@@ -478,7 +481,7 @@ function Meetings() {
       ) : matching.length ? (
         <section className="library">
           {matching.map((meeting) => (
-            <MeetingRow meeting={meeting} key={meeting.id} onRemoved={reload} />
+            <MeetingRow meeting={meeting} key={meeting.id} onRemoved={removeFromLibrary} />
           ))}
         </section>
       ) : (
@@ -606,12 +609,10 @@ function LocalWorkspace({ id }: { id: string }) {
           <h2>{title(meeting)}</h2>
         </div>
         <Status status={meeting.status} />
-        {meeting.status !== "processing" && (
-          <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting}>
-            <Trash2 size={16} />
-            {isDeleting ? "Đang xóa..." : "Xóa"}
-          </button>
-        )}
+        <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting}>
+          <Trash2 size={16} />
+          {isDeleting ? "Đang xóa..." : "Xóa"}
+        </button>
       </section>
       {deleteError && <p className="message" role="alert">{deleteError}</p>}
       {meeting.status !== "completed" ? (
