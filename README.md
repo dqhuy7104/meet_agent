@@ -86,15 +86,22 @@ nothing. The library API provides:
 
 | Request | Result |
 | --- | --- |
-| `POST /api/meetings` | Multipart `file` and optional `title`; queues audio and returns 202. Optional `Idempotency-Key` safely repeats the same audio. |
+| `POST /api/meetings` | Multipart `file` (legacy) or ordered `files` fields and optional `title`; queues one meeting and returns 202. Optional `Idempotency-Key` safely repeats the same upload. |
 | `GET /api/meetings?limit=20&offset=0` | Newest meetings and processing states. |
 | `GET /api/meetings/{id}` | Metadata and completed transcript, VAD regions, and speaker turns. |
-| `GET /api/meetings/{id}/audio` | Original audio; supports playback byte ranges. |
+| `GET /api/meetings/{id}/audio` | First original audio; supports playback byte ranges. |
+| `GET /api/meetings/{id}/audio/{ordinal}` | Original audio part by zero-based order; supports byte ranges. |
 | `GET /api/meetings/search?q=...` | Transcript segment matches from completed meetings. |
 | `POST /api/meetings/{id}/retry` | Requeue a failed meeting. |
 | `DELETE /api/meetings/{id}` | Cancel any meeting, including a running pipeline; retain metadata and remove audio. |
 
-Uploads are limited to 25 MiB and decoded audio to 30 minutes. Invalid audio
+Select multiple audio files in the web upload dialog, or send repeated `files`
+fields in one API request. The API preserves their order and returns
+`audio_files` in the meeting detail. Processing joins their transcripts and
+timestamps into one timeline; speaker labels in later files are prefixed with
+their part number because separate recordings cannot prove speaker identity
+across files. Each file is limited to 25 MiB, a meeting to 10 files and
+100 MiB total, and combined decoded audio to 30 minutes. Invalid audio
 or model failure leaves the meeting in `failed` with a safe failure code;
 the original audio remains available for retry or deletion. Deleting a running
 meeting returns immediately, terminates its dedicated inference process, marks

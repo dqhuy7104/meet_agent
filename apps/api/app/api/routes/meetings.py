@@ -19,7 +19,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import initialize_meeting_store, open_meeting_db
 from app.schemas.meeting import (
     MeetingAcceptedResponse, MeetingDetailResponse, MeetingListResponse, MeetingMetadataResponse,
-    MeetingSearchResponse, SearchHitResponse,
+    MeetingAudioFileResponse, MeetingSearchResponse, SearchHitResponse,
 )
 from app.services.meetings.repository import (
     IdempotencyConflict, MeetingRecord, MeetingRepository, MeetingStateConflict,
@@ -60,6 +60,8 @@ async def require_loopback(request: Request) -> None:
 
 
 router = APIRouter(prefix="/meetings", tags=["meetings"], dependencies=[Depends(require_loopback)])
+MAX_MEETING_FILES = 10
+MAX_MEETING_UPLOAD_BYTES = 100 * 1024 * 1024
 
 
 async def get_meeting_settings() -> Settings:
@@ -99,26 +101,49 @@ def _metadata(record: MeetingRecord) -> MeetingMetadataResponse:
 
 @router.post("", response_model=MeetingAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_meeting(
-    file: Annotated[UploadFile, File(description="Original meeting audio, up to 25 MiB")],
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
+    file: Annotated[UploadFile | None, File(description="One original audio file, up to 25 MiB")] = None,
+    files: Annotated[list[UploadFile] | None, File(description="Ordered meeting audio files")] = None,
     title: Annotated[str | None, Form(max_length=200)] = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
 ) -> MeetingAcceptedResponse:
-    """Store audio and queue one meeting without running inference in the API."""
-    if file.size is not None and file.size > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Audio file exceeds 25 MiB")
+    """Store ordered audio parts and queue one meeting."""
+    uploads = [file] if file is not None else files or []
+    if file is not None and files:
+        raise HTTPException(status_code=422, detail="Use either file or files")
+    if not uploads:
+        raise HTTPException(status_code=422, detail="At least one audio file is required")
+    if len(uploads) > MAX_MEETING_FILES:
+        raise HTTPException(status_code=413, detail="A meeting supports at most 10 audio files")
+    parts: list[tuple[str, bytes]] = []
+    total_bytes = 0
     try:
-        data = await file.read(MAX_UPLOAD_BYTES + 1)
+        for upload in uploads:
+            if upload.size is not None and upload.size > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Audio file exceeds 25 MiB")
+            data = await upload.read(MAX_UPLOAD_BYTES + 1)
+            if not data:
+                raise HTTPException(status_code=400, detail="Audio file is empty")
+            if len(data) > MAX_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Audio file exceeds 25 MiB")
+            total_bytes += len(data)
+            if total_bytes > MAX_MEETING_UPLOAD_BYTES:
+                raise HTTPException(status_code=413, detail="Meeting audio exceeds 100 MiB")
+            parts.append((upload.filename or "audio", data))
     finally:
-        await file.close()
-    if not data:
-        raise HTTPException(status_code=400, detail="Audio file is empty")
-    if len(data) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=413, detail="Audio file exceeds 25 MiB")
+        for upload in uploads:
+            await upload.close()
     if idempotency_key == "":
         raise HTTPException(status_code=422, detail="Idempotency-Key must not be empty")
-    checksum = hashlib.sha256(data).hexdigest()
+    if len(parts) == 1:
+        checksum = hashlib.sha256(parts[0][1]).hexdigest()
+    else:
+        digest = hashlib.sha256()
+        for _, data in parts:
+            digest.update(len(data).to_bytes(8, "big"))
+            digest.update(data)
+        checksum = digest.hexdigest()
     if idempotency_key:
         existing = repository.find_by_idempotency_key(idempotency_key)
         if existing:
@@ -127,19 +152,24 @@ async def upload_meeting(
             return _accepted(existing)
 
     with audio_publication_lock(settings.meeting_data_dir):
-        storage_key = publish_audio(settings.meeting_data_dir, data)
+        published: list[tuple[str, str]] = []
         try:
+            for filename, data in parts:
+                published.append((filename, publish_audio(settings.meeting_data_dir, data)))
             record = repository.create_meeting(
-                uuid.uuid4().hex, title, file.filename or "audio", storage_key, checksum, idempotency_key
+                uuid.uuid4().hex, title, published[0][0], published[0][1], checksum, idempotency_key,
+                audio_files=published,
             )
         except IdempotencyConflict as error:
-            audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
+            for _, storage_key in published:
+                audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
             existing = repository.find_by_idempotency_key(idempotency_key)
             if existing and existing.checksum == checksum:
                 return _accepted(existing)
             raise HTTPException(status_code=409, detail="Idempotency key belongs to different audio") from error
         except (sqlite3.Error, OSError):
-            audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
+            for _, storage_key in published:
+                audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
             raise
     return _accepted(record)
 
@@ -191,6 +221,10 @@ async def get_meeting(
         vad_segments=detail.vad_segments,
         diarization_segments=detail.diarization_segments,
         transcript_segments=detail.transcript_segments,
+        audio_files=[MeetingAudioFileResponse(
+            ordinal=part.ordinal, original_filename=part.original_filename,
+            duration_seconds=part.duration_seconds,
+        ) for part in detail.audio_files],
     )
 
 
@@ -200,14 +234,35 @@ async def get_meeting_audio(
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
 ) -> FileResponse:
-    """Serve the original audio, including byte range requests."""
+    """Serve the first original audio for the legacy URL."""
+    return _audio_response(meeting_id, 0, repository, settings)
+
+
+@router.get("/{meeting_id}/audio/{ordinal}", response_class=FileResponse)
+async def get_meeting_audio_part(
+    meeting_id: str,
+    ordinal: int,
+    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+    settings: Annotated[Settings, Depends(get_meeting_settings)],
+) -> FileResponse:
+    """Serve one original audio part, including byte ranges."""
+    return _audio_response(meeting_id, ordinal, repository, settings)
+
+
+def _audio_response(
+    meeting_id: str, ordinal: int, repository: MeetingRepository, settings: Settings,
+) -> FileResponse:
     record = repository.get_meeting(meeting_id)
-    if record is None:
+    if record is None or record.status == "cancelled":
         raise HTTPException(status_code=404, detail="Meeting not found")
-    path = audio_path(settings.meeting_data_dir, record.storage_key)
+    audio_files = repository.get_audio_files(meeting_id)
+    part = next((part for part in audio_files if part.ordinal == ordinal), None)
+    if part is None:
+        raise HTTPException(status_code=404, detail="Meeting audio unavailable")
+    path = audio_path(settings.meeting_data_dir, part.storage_key)
     if not path.is_file():
         raise HTTPException(status_code=404, detail="Meeting audio unavailable")
-    filename = Path(record.original_filename.replace("\\", "/")).name
+    filename = Path(part.original_filename.replace("\\", "/")).name
     return FileResponse(path, filename=filename, media_type="application/octet-stream")
 
 
@@ -221,7 +276,8 @@ async def delete_meeting(
     cancelled = repository.cancel(meeting_id)
     if cancelled is None:
         raise HTTPException(status_code=404, detail="Meeting not found")
-    audio_path(settings.meeting_data_dir, cancelled.storage_key).unlink(missing_ok=True)
+    for storage_key in (cancelled.storage_key, *cancelled.other_storage_keys):
+        audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
     if cancelled.pipeline_pid is not None and cancelled.pipeline_start_ticks is not None:
         terminate_process(cancelled.pipeline_pid, cancelled.pipeline_start_ticks)
 

@@ -103,6 +103,40 @@ class MeetingWorkerTest(unittest.TestCase):
         self.assertIsNone(self.repository.claim_next())
         self.assertFalse(run_once(self.repository, self.data_dir, self.settings))
 
+    def test_worker_combines_ordered_audio_files_on_one_timeline(self) -> None:
+        first = publish_audio(self.data_dir, b"first")
+        second = publish_audio(self.data_dir, b"second")
+        self.repository.create_meeting(
+            "multi", "Planning", "first.wav", first, "checksum", None,
+            audio_files=[("first.wav", first), ("second.wav", second)],
+        )
+        self.repository.cancel("m1")
+        with patch("app.services.meetings.worker.process_audio", side_effect=lambda data, name, models: _result(name)):
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+        detail = self.repository.get_detail("multi")
+        self.assertEqual(detail.meeting.status, "completed")
+        self.assertEqual(detail.meeting.duration_seconds, 2.0)
+        self.assertEqual([part.duration_seconds for part in detail.audio_files], [1.0, 1.0])
+        self.assertEqual([(segment.start, segment.end) for segment in detail.transcript_segments], [(0.0, 1.0), (1.0, 2.0)])
+        self.assertEqual([segment.speaker for segment in detail.transcript_segments], ["SPEAKER_00", "PART_2_SPEAKER_00"])
+
+    def test_multi_file_meeting_over_duration_limit_has_no_partial_results(self) -> None:
+        first = publish_audio(self.data_dir, b"first")
+        second = publish_audio(self.data_dir, b"second")
+        self.repository.create_meeting(
+            "multi", None, "first.wav", first, "checksum", None,
+            audio_files=[("first.wav", first), ("second.wav", second)],
+        )
+        self.repository.cancel("m1")
+        with patch("app.services.meetings.worker.process_audio", return_value=_result().model_copy(
+            update={"duration_seconds": 1000.0}
+        )):
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+        detail = self.repository.get_detail("multi")
+        self.assertEqual(detail.meeting.status, "failed")
+        self.assertEqual(detail.meeting.failure_code, "audio_too_long")
+        self.assertEqual(detail.transcript_segments, [])
+
     def test_worker_maps_known_and_unknown_failures_to_safe_codes(self) -> None:
         failures = [
             (InvalidAudioError("bad"), "invalid_audio"),

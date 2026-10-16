@@ -127,6 +127,10 @@ class MeetingStoreTest(unittest.TestCase):
             columns = {row[1] for row in migrated.execute("PRAGMA table_info(meetings)")}
             self.assertTrue({"pipeline_pid", "pipeline_start_ticks", "cancelled_at"}.issubset(columns))
             self.assertEqual(migrated.execute("SELECT transcript FROM meetings WHERE id='m1'").fetchone()[0], "done")
+            parts = MeetingRepository(migrated).get_audio_files("m1")
+            self.assertEqual([(part.ordinal, part.original_filename, part.storage_key) for part in parts], [
+                (0, "meeting.wav", "key")
+            ])
         finally:
             migrated.close()
 

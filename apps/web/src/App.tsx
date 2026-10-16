@@ -321,28 +321,30 @@ function UploadModal({
   close: () => void;
   onUploaded: (id: string) => void;
 }) {
-  const [file, setFile] = useState<File>();
+  const [files, setFiles] = useState<File[]>([]);
   const [meetingTitle, setMeetingTitle] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const input = useRef<HTMLInputElement>(null);
-  const select = (next?: File) => {
-    if (!next) return;
-    if (!next.type.startsWith("audio/") || next.size > 25 * 1024 * 1024) {
-      setMessage("Chọn file audio hợp lệ, tối đa 25 MiB.");
+  const select = (selected: FileList | null) => {
+    const next = Array.from(selected ?? []);
+    if (!next.length) return;
+    if (next.length > 10 || next.some((file) => !file.type.startsWith("audio/") || !file.size || file.size > 25 * 1024 * 1024) || next.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
+      setFiles([]);
+      setMessage("Chọn tối đa 10 file audio, mỗi file tối đa 25 MiB và tổng tối đa 100 MiB.");
       return;
     }
-    setFile(next);
+    setFiles(next);
     setMessage("");
   };
   const send = async () => {
-    if (!file) {
-      setMessage("Chọn một file audio để tiếp tục.");
+    if (!files.length) {
+      setMessage("Chọn ít nhất một file audio để tiếp tục.");
       return;
     }
     setBusy(true);
     try {
-      const meeting = await meetingApi.upload(file, meetingTitle);
+      const meeting = await meetingApi.upload(files, meetingTitle);
       onUploaded(meeting.meeting_id);
     } catch (cause) {
       setMessage(
@@ -368,28 +370,29 @@ function UploadModal({
         <mark>LOCAL UPLOAD</mark>
         <h2 id="upload-title">Tải bản ghi lên</h2>
         <p>
-          File được gửi đến meeting library trên máy local. Giới hạn 25 MiB.
+          Chọn tối đa 10 phần ghi âm theo thứ tự phát. Mỗi file tối đa 25 MiB, tổng tối đa 100 MiB.
         </p>
         <label
           className="drop"
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
             event.preventDefault();
-            select(event.dataTransfer.files[0]);
+            select(event.dataTransfer.files);
           }}
         >
           <input
             ref={input}
             type="file"
             accept="audio/*"
-            onChange={(event) => select(event.target.files?.[0])}
+            multiple
+            onChange={(event) => select(event.target.files)}
           />
           <UploadIcon size={26} />
-          <b>{file ? file.name : "Kéo thả audio vào đây"}</b>
+          <b>{files.length ? `${files.length} file đã chọn` : "Kéo thả audio vào đây"}</b>
           <small>
-            {file
-              ? `${(file.size / 1048576).toFixed(1)} MiB · sẵn sàng tải lên`
-              : "hoặc chọn file từ máy tính"}
+            {files.length
+              ? files.map((file, index) => `${index + 1}. ${file.name}`).join(" · ")
+              : "hoặc chọn nhiều file từ máy tính"}
           </small>
           <button
             type="button"
@@ -398,7 +401,7 @@ function UploadModal({
               input.current?.click();
             }}
           >
-            Chọn file
+            Chọn file audio
           </button>
         </label>
         <label className="input">
@@ -520,7 +523,7 @@ function LocalWorkspace({ id }: { id: string }) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [query, setQuery] = useState("");
   const navigate = useNavigate();
-  const audio = useRef<HTMLAudioElement>(null);
+  const audios = useRef<(HTMLAudioElement | null)[]>([]);
   const load = useCallback(
     async (signal?: AbortSignal) => {
       try {
@@ -556,9 +559,19 @@ function LocalWorkspace({ id }: { id: string }) {
     };
   }, [load]);
   const seek = (seconds: number) => {
-    if (audio.current) {
-      audio.current.currentTime = seconds;
-      void audio.current.play().catch(() => undefined);
+    let offset = 0;
+    const parts = meeting?.audio_files ?? [];
+    for (const part of parts) {
+      const partDuration = part.duration_seconds ?? 0;
+      if (seconds < offset + partDuration || part.ordinal === parts.length - 1) {
+        const player = audios.current[part.ordinal];
+        if (player) {
+          player.currentTime = Math.max(0, seconds - offset);
+          void player.play().catch(() => undefined);
+        }
+        return;
+      }
+      offset += partDuration;
     }
   };
   const remove = async () => {
@@ -639,7 +652,20 @@ function LocalWorkspace({ id }: { id: string }) {
                   <h3>Bản ghi từ meeting library</h3>
                 </div>
               </div>
-              <audio ref={audio} controls src={meetingApi.audioUrl(id)} />
+              {meeting.audio_files.map((part) => (
+                <div key={part.ordinal}>
+                  {meeting.audio_files.length > 1 && <p>{part.ordinal + 1}. {part.original_filename}</p>}
+                  <audio
+                    ref={(node) => { audios.current[part.ordinal] = node; }}
+                    controls
+                    aria-label={`Audio phần ${part.ordinal + 1}: ${part.original_filename}`}
+                    src={meetingApi.audioUrl(id, part.ordinal)}
+                    onPlay={() => audios.current.forEach((other, index) => {
+                      if (index !== part.ordinal) other?.pause();
+                    })}
+                  />
+                </div>
+              ))}
             </div>
             <div className="transcript-title">
               <div>

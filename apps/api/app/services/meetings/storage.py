@@ -58,7 +58,7 @@ def cleanup_orphaned_audio(data_dir: Path) -> None:
                 temporary.unlink(missing_ok=True)
         connection = sqlite3.connect(data_dir / "meetings.sqlite3")
         try:
-            referenced = {row[0] for row in connection.execute("SELECT storage_key FROM meetings")}
+            referenced = {row[0] for row in connection.execute("SELECT storage_key FROM meeting_audio_files")}
         finally:
             connection.close()
         for audio in (data_dir / "audio").iterdir():

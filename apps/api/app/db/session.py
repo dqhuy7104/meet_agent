@@ -115,6 +115,14 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 text TEXT NOT NULL,
                 UNIQUE (meeting_id, ordinal)
             );
+            CREATE TABLE IF NOT EXISTS meeting_audio_files (
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                original_filename TEXT NOT NULL,
+                storage_key TEXT NOT NULL UNIQUE,
+                duration_seconds REAL,
+                PRIMARY KEY (meeting_id, ordinal)
+            );
             CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
                 meeting_id UNINDEXED, segment_id UNINDEXED, text, tokenize='unicode61'
             );
@@ -122,6 +130,10 @@ def initialize_meeting_store(data_dir: Path) -> None:
             """
         )
         _migrate_meetings_table(connection)
+        connection.execute(
+            """INSERT OR IGNORE INTO meeting_audio_files (meeting_id, ordinal, original_filename, storage_key)
+               SELECT id, 0, original_filename, storage_key FROM meetings WHERE status != 'cancelled'"""
+        )
         connection.commit()
     finally:
         connection.close()

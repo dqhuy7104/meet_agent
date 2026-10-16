@@ -38,11 +38,18 @@ class MeetingListResponse(BaseModel):
     offset: int
 
 
+class MeetingAudioFileResponse(BaseModel):
+    ordinal: int
+    original_filename: str
+    duration_seconds: float | None
+
+
 class MeetingDetailResponse(MeetingMetadataResponse):
     transcript: str | None
     vad_segments: list[SpeechSegment]
     diarization_segments: list[SpeakerTurn]
     transcript_segments: list[TranscriptSegment]
+    audio_files: list[MeetingAudioFileResponse]
 
 
 class SearchHitResponse(BaseModel):

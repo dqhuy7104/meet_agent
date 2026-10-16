@@ -55,6 +55,48 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(body["created_at"])
         self.assertEqual(len(list((self.data_dir / "audio").iterdir())), 1)
 
+    async def test_multiple_files_create_one_meeting_and_preserve_order(self) -> None:
+        response = await self.client.post(
+            "/api/meetings",
+            files=[
+                ("files", ("first.wav", b"first audio", "audio/wav")),
+                ("files", ("second.wav", b"second audio", "audio/wav")),
+            ],
+            data={"title": "Planning"},
+        )
+        self.assertEqual(response.status_code, 202)
+        meeting_id = response.json()["meeting_id"]
+        self.assertEqual((await self.client.get("/api/meetings")).json()["total"], 1)
+        detail = (await self.client.get(f"/api/meetings/{meeting_id}")).json()
+        self.assertEqual([part["original_filename"] for part in detail["audio_files"]], ["first.wav", "second.wav"])
+        self.assertEqual((await self.client.get(f"/api/meetings/{meeting_id}/audio/0")).content, b"first audio")
+        self.assertEqual((await self.client.get(f"/api/meetings/{meeting_id}/audio/1")).content, b"second audio")
+        self.assertEqual(
+            (await self.client.get(f"/api/meetings/{meeting_id}/audio/1", headers={"Range": "bytes=0-5"})).content,
+            b"second",
+        )
+        self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
+        self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
+
+    async def test_multiple_files_reject_empty_part_without_persisting(self) -> None:
+        response = await self.client.post(
+            "/api/meetings",
+            files=[("files", ("a.wav", b"valid", "audio/wav")), ("files", ("empty.wav", b"", "audio/wav"))],
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
+
+    async def test_multi_file_idempotency_uses_ordered_content(self) -> None:
+        first = [("files", ("a.wav", b"a", "audio/wav")), ("files", ("b.wav", b"b", "audio/wav"))]
+        reverse = list(reversed(first))
+        original = await self.client.post("/api/meetings", files=first, headers={"Idempotency-Key": "multi"})
+        repeated = await self.client.post("/api/meetings", files=first, headers={"Idempotency-Key": "multi"})
+        conflict = await self.client.post("/api/meetings", files=reverse, headers={"Idempotency-Key": "multi"})
+        self.assertEqual(original.status_code, 202)
+        self.assertEqual(repeated.json()["meeting_id"], original.json()["meeting_id"])
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(len(list((self.data_dir / "audio").iterdir())), 2)
+
     async def test_empty_upload_is_400(self) -> None:
         response = await self._upload(b"")
         self.assertEqual(response.status_code, 400)
@@ -107,7 +149,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         cleanup_done = threading.Event()
         cleaners: list[threading.Thread] = []
 
-        def create_with_concurrent_cleanup(repository: MeetingRepository, *args: object) -> object:
+        def create_with_concurrent_cleanup(repository: MeetingRepository, *args: object, **kwargs: object) -> object:
             from app.services.meetings.storage import cleanup_orphaned_audio
 
             def clean() -> None:
@@ -120,7 +162,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             cleaner.start()
             self.assertTrue(cleanup_started.wait(1))
             self.assertFalse(cleanup_done.wait(0.1))
-            return original_create(repository, *args)
+            return original_create(repository, *args, **kwargs)
 
         try:
             with patch.object(MeetingRepository, "create_meeting", create_with_concurrent_cleanup):
