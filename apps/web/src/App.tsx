@@ -1,0 +1,751 @@
+import {
+  createElement,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type ComponentType,
+  type ReactNode,
+} from "react";
+import {
+  NavLink,
+  Route,
+  Routes,
+  useNavigate,
+  useParams,
+} from "react-router-dom";
+import {
+  ChevronLeft,
+  Clock3,
+  FileAudio,
+  LayoutDashboard,
+  Menu,
+  Moon,
+  PanelLeftOpen,
+  Plus,
+  Search,
+  Settings,
+  Sparkles,
+  Trash2,
+  Upload as UploadIcon,
+  X,
+} from "lucide-react";
+import { ApiError, meetingApi, type BackendMeeting } from "./lib/api";
+import type { ApiMeeting, MeetingStatus } from "./types/meeting";
+
+const labels: Record<MeetingStatus, string> = {
+  completed: "Hoàn tất",
+  processing: "Đang xử lý",
+  queued: "Đang chờ",
+  failed: "Cần thử lại",
+};
+const time = (seconds: number) =>
+  `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
+const duration = (seconds: number | null) =>
+  seconds === null
+    ? "Chưa có thời lượng"
+    : seconds < 60
+      ? `${Math.round(seconds)} giây`
+      : `${Math.floor(seconds / 60)} phút`;
+const title = (meeting: ApiMeeting) =>
+  meeting.title ?? meeting.original_filename;
+const date = (meeting: ApiMeeting) =>
+  new Date(meeting.created_at).toLocaleDateString("vi-VN");
+function Status({ status }: { status: MeetingStatus }) {
+  return (
+    <span className={`status ${status}`}>
+      <i />
+      {labels[status]}
+    </span>
+  );
+}
+function Shell({ children }: { children: ReactNode }) {
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
+  const [dark, setDark] = useState(false);
+  const navigation = [
+    ["/", "Tổng quan", LayoutDashboard],
+    ["/meetings", "Cuộc họp", FileAudio],
+    ["/settings", "Cài đặt", Settings],
+  ] as const;
+  return (
+    <div
+      className={`app ${isSidebarOpen ? "" : "sidebar-hidden"}`}
+      data-theme={dark ? "dark" : "light"}
+    >
+      <aside>
+        <div className="brand">
+          <b>
+            <span>
+              Meeting<i> Agent</i>
+            </span>
+          </b>
+          <button
+            onClick={() => setIsSidebarOpen(false)}
+            aria-label="Ẩn điều hướng"
+          >
+            <Menu />
+          </button>
+        </div>
+        <nav>
+          {navigation.map(([to, name, Icon]) => (
+            <NavLink key={to} to={to} end={to === "/"}>
+              {createElement(Icon as ComponentType<{ size?: number }>, {
+                size: 19,
+              })}
+              <span>{name}</span>
+            </NavLink>
+          ))}
+        </nav>
+        <div className="mode">
+          <i /> <span>Thư viện local</span>
+        </div>
+      </aside>
+      <main>
+        {!isSidebarOpen && (
+          <button
+            className="sidebar-open-button"
+            onClick={() => setIsSidebarOpen(true)}
+            aria-label="Mở điều hướng"
+          >
+            <PanelLeftOpen />
+          </button>
+        )}
+        <header>
+          <div>
+            <small>WORKSPACE</small>
+          </div>
+          <div className="header-actions">
+            <button onClick={() => setDark(!dark)} aria-label="Đổi giao diện">
+              <Moon />
+            </button>
+          </div>
+        </header>
+        {children}
+      </main>
+    </div>
+  );
+}
+function useMeetingLibrary() {
+  const [items, setItems] = useState<ApiMeeting[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [error, setError] = useState("");
+  const load = useCallback(async (signal?: AbortSignal) => {
+    try {
+      const page = await meetingApi.list(signal);
+      setItems(page.items);
+      setTotal(page.total);
+      setError("");
+    } catch (cause) {
+      if (!signal?.aborted)
+        setError(
+          cause instanceof ApiError
+            ? cause.message
+            : "Không thể tải thư viện meeting local.",
+        );
+    }
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void load(controller.signal);
+    return () => controller.abort();
+  }, [load]);
+  return { items, total, error, reload: () => void load() };
+}
+function MeetingRow({
+  meeting,
+  onRemoved,
+}: {
+  meeting: ApiMeeting;
+  onRemoved?: () => void;
+}) {
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const remove = async () => {
+    if (!window.confirm(`Xóa cuộc họp “${title(meeting)}”? Audio và transcript sẽ bị xóa.`)) return;
+    setIsDeleting(true);
+    setDeleteError("");
+    try {
+      await meetingApi.remove(meeting.id);
+      onRemoved?.();
+    } catch (cause) {
+      setDeleteError(cause instanceof ApiError ? cause.message : "Không thể xóa cuộc họp local.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+  return (
+    <div className="meeting-row">
+      <NavLink to={`/workspace/${meeting.id}`} className="meeting-link">
+        <span className="file"><FileAudio size={18} /></span>
+        <div><b>{title(meeting)}</b><small>{date(meeting)} · {duration(meeting.duration_seconds)}</small></div>
+        <p>{meeting.original_filename}</p><span /><Status status={meeting.status} />
+      </NavLink>
+      {meeting.status !== "processing" && (
+        <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting} aria-label={`Xóa ${title(meeting)}`} title={deleteError || "Xóa cuộc họp"}>
+          <Trash2 size={16} /> {isDeleting ? "Đang xóa..." : "Xóa"}
+        </button>
+      )}
+    </div>
+  );
+}
+function LibraryError({
+  message,
+  retry,
+}: {
+  message: string;
+  retry: () => void;
+}) {
+  return (
+    <div className="empty">
+      <FileAudio />
+      <h3>{message}</h3>
+      <button className="primary" onClick={retry}>
+        Thử lại
+      </button>
+    </div>
+  );
+}
+function Stat({
+  icon: Icon,
+  label,
+  value,
+  detail,
+}: {
+  icon: ComponentType<{ size?: number }>;
+  label: string;
+  value: string;
+  detail: string;
+}) {
+  return (
+    <article className="stat">
+      <span>
+        <Icon size={19} />
+      </span>
+      <small>{label}</small>
+      <b>{value}</b>
+      <em>{detail}</em>
+    </article>
+  );
+}
+function Dashboard() {
+  const { items, total, error, reload } = useMeetingLibrary();
+  if (error)
+    return (
+      <div className="page">
+        <LibraryError message={error} retry={reload} />
+      </div>
+    );
+  if (!items)
+    return (
+      <div className="page">
+        <div className="empty">
+          <Clock3 />
+          <h3>Đang tải thư viện cuộc họp…</h3>
+        </div>
+      </div>
+    );
+  const completed = items.filter(({ status }) => status === "completed").length;
+  const waiting = items.filter(
+    ({ status }) => status === "queued" || status === "processing",
+  ).length;
+  return (
+    <div className="page">
+      <section className="hero">
+        <div>
+          <mark>MEETING LIBRARY LOCAL</mark>
+          <h2>
+            Quản lý và xem lại
+            <br />
+            <em>bản ghi cuộc họp.</em>
+          </h2>
+          <p>
+            Tải audio lên máy local, theo dõi xử lý và xem transcript theo thời
+            gian.
+          </p>
+        </div>
+        <NavLink className="primary" to="/meetings">
+          <UploadIcon size={17} /> Tải bản ghi lên
+        </NavLink>
+      </section>
+      <section className="stats">
+        <Stat
+          icon={FileAudio}
+          label="Tổng cuộc họp"
+          value={String(total)}
+          detail="Theo dữ liệu từ API local"
+        />
+        <Stat
+          icon={Clock3}
+          label="Hoàn tất"
+          value={String(completed)}
+          detail="Trong các cuộc họp đang hiển thị"
+        />
+        <Stat
+          icon={Clock3}
+          label="Đang xử lý"
+          value={String(waiting)}
+          detail="Trong các cuộc họp đang hiển thị"
+        />
+      </section>
+      <section className="panel recent">
+        <div className="panel-head">
+          <div>
+            <h3>Cuộc họp gần đây</h3>
+            <p>Dữ liệu từ meeting library local</p>
+          </div>
+          <NavLink to="/meetings">Xem tất cả</NavLink>
+        </div>
+        {items.length ? (
+          items
+            .slice(0, 4)
+            .map((meeting) => <MeetingRow meeting={meeting} key={meeting.id} onRemoved={reload} />)
+        ) : (
+          <div className="empty">
+            <FileAudio />
+            <h3>Chưa có cuộc họp nào</h3>
+            <p>Tải bản ghi audio đầu tiên để bắt đầu.</p>
+          </div>
+        )}
+      </section>
+    </div>
+  );
+}
+function UploadModal({
+  close,
+  onUploaded,
+}: {
+  close: () => void;
+  onUploaded: (id: string) => void;
+}) {
+  const [file, setFile] = useState<File>();
+  const [meetingTitle, setMeetingTitle] = useState("");
+  const [message, setMessage] = useState("");
+  const [busy, setBusy] = useState(false);
+  const input = useRef<HTMLInputElement>(null);
+  const select = (next?: File) => {
+    if (!next) return;
+    if (!next.type.startsWith("audio/") || next.size > 25 * 1024 * 1024) {
+      setMessage("Chọn file audio hợp lệ, tối đa 25 MiB.");
+      return;
+    }
+    setFile(next);
+    setMessage("");
+  };
+  const send = async () => {
+    if (!file) {
+      setMessage("Chọn một file audio để tiếp tục.");
+      return;
+    }
+    setBusy(true);
+    try {
+      const meeting = await meetingApi.upload(file, meetingTitle);
+      onUploaded(meeting.meeting_id);
+    } catch (cause) {
+      setMessage(
+        cause instanceof ApiError
+          ? cause.message
+          : "Không kết nối được API local.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div
+      className="overlay"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="upload-title"
+    >
+      <div className="upload">
+        <button className="close" onClick={close} aria-label="Đóng">
+          <X />
+        </button>
+        <mark>LOCAL UPLOAD</mark>
+        <h2 id="upload-title">Tải bản ghi lên</h2>
+        <p>
+          File được gửi đến meeting library trên máy local. Giới hạn 25 MiB.
+        </p>
+        <label
+          className="drop"
+          onDragOver={(event) => event.preventDefault()}
+          onDrop={(event) => {
+            event.preventDefault();
+            select(event.dataTransfer.files[0]);
+          }}
+        >
+          <input
+            ref={input}
+            type="file"
+            accept="audio/*"
+            onChange={(event) => select(event.target.files?.[0])}
+          />
+          <UploadIcon size={26} />
+          <b>{file ? file.name : "Kéo thả audio vào đây"}</b>
+          <small>
+            {file
+              ? `${(file.size / 1048576).toFixed(1)} MiB · sẵn sàng tải lên`
+              : "hoặc chọn file từ máy tính"}
+          </small>
+          <button
+            type="button"
+            onClick={(event) => {
+              event.preventDefault();
+              input.current?.click();
+            }}
+          >
+            Chọn file
+          </button>
+        </label>
+        <label className="input">
+          Tên cuộc họp
+          <input
+            maxLength={200}
+            value={meetingTitle}
+            onChange={(event) => setMeetingTitle(event.target.value)}
+            placeholder="Ví dụ: Sprint planning tuần 42"
+          />
+        </label>
+        {message && (
+          <p className="message" role="alert">
+            {message}
+          </p>
+        )}
+        <button className="primary full" onClick={send} disabled={busy}>
+          {busy ? "Đang gửi..." : "Bắt đầu xử lý"}
+        </button>
+      </div>
+    </div>
+  );
+}
+function Meetings() {
+  const [query, setQuery] = useState("");
+  const [filter, setFilter] = useState<MeetingStatus | "all">("all");
+  const [open, setOpen] = useState(false);
+  const navigate = useNavigate();
+  const { items, error, reload } = useMeetingLibrary();
+  const matching =
+    items?.filter(
+      (meeting) =>
+        (filter === "all" || meeting.status === filter) &&
+        `${title(meeting)} ${meeting.original_filename}`
+          .toLowerCase()
+          .includes(query.toLowerCase()),
+    ) ?? [];
+  return (
+    <div className="page">
+      <section className="title">
+        <div>
+          <small>THƯ VIỆN</small>
+          <h2>Cuộc họp của bạn</h2>
+          <p>Tải lên và xem lại các bản ghi được xử lý trên máy local.</p>
+        </div>
+        <button className="primary" onClick={() => setOpen(true)}>
+          <Plus />
+          Cuộc họp mới
+        </button>
+      </section>
+      <div className="toolbar">
+        <label>
+          <Search size={18} />
+          <input
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Tìm theo tiêu đề hoặc tên file..."
+          />
+        </label>
+        <select
+          value={filter}
+          onChange={(event) =>
+            setFilter(event.target.value as MeetingStatus | "all")
+          }
+        >
+          <option value="all">Mọi trạng thái</option>
+          {Object.entries(labels).map(([status, label]) => (
+            <option key={status} value={status}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+      {error ? (
+        <LibraryError message={error} retry={reload} />
+      ) : !items ? (
+        <div className="empty">
+          <Clock3 />
+          <h3>Đang tải thư viện cuộc họp…</h3>
+        </div>
+      ) : matching.length ? (
+        <section className="library">
+          {matching.map((meeting) => (
+            <MeetingRow meeting={meeting} key={meeting.id} onRemoved={reload} />
+          ))}
+        </section>
+      ) : (
+        <div className="empty">
+          <Search />
+          <h3>
+            {items.length ? "Không tìm thấy cuộc họp" : "Chưa có cuộc họp nào"}
+          </h3>
+          <p>
+            {items.length
+              ? "Thử một từ khóa hoặc bộ lọc khác."
+              : "Tải bản ghi audio đầu tiên để bắt đầu."}
+          </p>
+        </div>
+      )}
+      {open && (
+        <UploadModal
+          close={() => setOpen(false)}
+          onUploaded={(id) => {
+            setOpen(false);
+            navigate(`/workspace/${id}`);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+function Workspace() {
+  const { id = "" } = useParams();
+  return <LocalWorkspace id={id} />;
+}
+function LocalWorkspace({ id }: { id: string }) {
+  const [meeting, setMeeting] = useState<BackendMeeting>();
+  const [error, setError] = useState("");
+  const [deleteError, setDeleteError] = useState("");
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [query, setQuery] = useState("");
+  const navigate = useNavigate();
+  const audio = useRef<HTMLAudioElement>(null);
+  const load = useCallback(
+    async (signal?: AbortSignal) => {
+      try {
+        const result = await meetingApi.get(id, signal);
+        setMeeting(result);
+        setError("");
+        return result;
+      } catch (cause) {
+        if (!signal?.aborted)
+          setError(
+            cause instanceof ApiError
+              ? cause.message
+              : "Không tải được cuộc họp local.",
+          );
+        return undefined;
+      }
+    },
+    [id],
+  );
+  useEffect(() => {
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    void load(controller.signal).then((result) => {
+      if (
+        result &&
+        (result.status === "queued" || result.status === "processing")
+      )
+        timer = setTimeout(() => void load(controller.signal), 3000);
+    });
+    return () => {
+      controller.abort();
+      clearTimeout(timer);
+    };
+  }, [load]);
+  const seek = (seconds: number) => {
+    if (audio.current) {
+      audio.current.currentTime = seconds;
+      void audio.current.play().catch(() => undefined);
+    }
+  };
+  const remove = async () => {
+    if (!meeting || !window.confirm(`Xóa cuộc họp “${title(meeting)}”? Audio và transcript sẽ bị xóa.`)) return;
+    setIsDeleting(true);
+    setDeleteError("");
+    try {
+      await meetingApi.remove(id);
+      navigate("/meetings");
+    } catch (cause) {
+      setDeleteError(cause instanceof ApiError ? cause.message : "Không thể xóa cuộc họp local.");
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+  if (error)
+    return (
+      <div className="page">
+        <button className="back" onClick={() => navigate("/meetings")}>
+          <ChevronLeft />
+          Thư viện
+        </button>
+        <LibraryError message={error} retry={() => void load()} />
+      </div>
+    );
+  if (!meeting)
+    return (
+      <div className="page">
+        <div className="empty">
+          <Clock3 />
+          <h3>Đang tải cuộc họp local…</h3>
+        </div>
+      </div>
+    );
+  const segments = meeting.transcript_segments.filter(
+    (segment) =>
+      !query || segment.text.toLowerCase().includes(query.toLowerCase()),
+  );
+  return (
+    <div className="page workspace">
+      <section className="work-title">
+        <button className="back" onClick={() => navigate("/meetings")}>
+          <ChevronLeft />
+          Cuộc họp
+        </button>
+        <div>
+          <small>MEETING LIBRARY LOCAL</small>
+          <h2>{title(meeting)}</h2>
+        </div>
+        <Status status={meeting.status} />
+        {meeting.status !== "processing" && (
+          <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting}>
+            <Trash2 size={16} />
+            {isDeleting ? "Đang xóa..." : "Xóa"}
+          </button>
+        )}
+      </section>
+      {deleteError && <p className="message" role="alert">{deleteError}</p>}
+      {meeting.status !== "completed" ? (
+        <div className="empty">
+          <Clock3 />
+          <h3>
+            {meeting.status === "failed"
+              ? "Xử lý chưa thành công"
+              : "Bản ghi đang được xử lý"}
+          </h3>
+          <p>
+            {meeting.status === "failed"
+              ? "Bạn có thể thử lại từ API local."
+              : "Trang sẽ tự cập nhật khi worker hoàn thành."}
+          </p>
+        </div>
+      ) : (
+        <div className="work-grid">
+          <section>
+            <div className="audio">
+              <div className="audio-top">
+                <div>
+                  <small>AUDIO</small>
+                  <h3>Bản ghi từ meeting library</h3>
+                </div>
+              </div>
+              <audio ref={audio} controls src={meetingApi.audioUrl(id)} />
+            </div>
+            <div className="transcript-title">
+              <div>
+                <h3>Transcript</h3>
+                <p>
+                  {meeting.transcript_segments.length} đoạn · dữ liệu backend
+                </p>
+              </div>
+              <label>
+                <Search size={16} />
+                <input
+                  value={query}
+                  onChange={(event) => setQuery(event.target.value)}
+                  placeholder="Tìm trong transcript"
+                />
+              </label>
+            </div>
+            <div className="transcript">
+              {segments.map((segment, index) => (
+                <article
+                  key={`${segment.start}-${index}`}
+                  onClick={() => seek(segment.start)}
+                >
+                  <i>{segment.speaker}</i>
+                  <div>
+                    <header>
+                      <b>{segment.speaker}</b>
+                      <button
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          seek(segment.start);
+                        }}
+                      >
+                        {time(segment.start)}
+                      </button>
+                    </header>
+                    <p>{segment.text}</p>
+                  </div>
+                </article>
+              ))}
+              {!segments.length && (
+                <div className="empty">
+                  <Search />
+                  <h3>Không tìm thấy đoạn transcript</h3>
+                </div>
+              )}
+            </div>
+          </section>
+          <aside className="insight">
+            <div className="ai">
+              <span>
+                <Sparkles size={16} />
+              </span>
+              <div>
+                <small>BACKEND DATA</small>
+                <h3>Speech & speakers</h3>
+              </div>
+            </div>
+            <div className="insight-body">
+              <h4>Diarization</h4>
+              <p>
+                {meeting.diarization_segments.length} speaker turn được backend
+                trả về, gồm cả các đoạn chồng lấp.
+              </p>
+            </div>
+          </aside>
+        </div>
+      )}
+    </div>
+  );
+}
+function SettingsPage() {
+  return (
+    <div className="page">
+      <section className="title">
+        <div>
+          <small>PREFERENCES</small>
+          <h2>Cài đặt workspace</h2>
+          <p>Quyền riêng tư được ưu tiên cho các bản ghi họp.</p>
+        </div>
+      </section>
+      <section className="panel setting">
+        <h3>Nguồn dữ liệu</h3>
+        <p>
+          Giao diện chỉ hiển thị dữ liệu từ endpoint local{" "}
+          <code>/api/meetings</code>.
+        </p>
+      </section>
+      <section className="panel setting">
+        <h3>Quyền riêng tư</h3>
+        <p>
+          Không lưu audio hoặc transcript trong browser storage. API local chỉ
+          nên chạy trên loopback.
+        </p>
+      </section>
+    </div>
+  );
+}
+export default function App() {
+  return (
+    <Shell>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/meetings" element={<Meetings />} />
+        <Route path="/workspace/:id" element={<Workspace />} />
+        <Route path="/settings" element={<SettingsPage />} />
+      </Routes>
+    </Shell>
+  );
+}
