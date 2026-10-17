@@ -27,6 +27,13 @@ class Settings:
     model_device: str = "auto"
     huggingface_token: str | None = None
     meeting_data_dir: Path = Path("./meeting-data")
+    bot_chrome_path: Path | None = None
+    bot_audio_sink: str | None = None
+    bot_admission_timeout_seconds: int = 300
+
+    @property
+    def bot_profile_dir(self) -> Path:
+        return self.meeting_data_dir / "bot-profile"
 
     @classmethod
     def from_environment(cls, environment: Mapping[str, str] | None = None) -> "Settings":
@@ -39,6 +46,9 @@ class Settings:
         model_device = values.get("MODEL_DEVICE", cls.model_device).strip().lower()
         huggingface_token = values.get("HUGGINGFACE_TOKEN", "").strip() or None
         meeting_data_dir = values.get("MEETING_DATA_DIR", str(cls.meeting_data_dir)).strip()
+        bot_chrome_path = values.get("BOT_CHROME_PATH", "").strip()
+        bot_audio_sink = values.get("BOT_AUDIO_SINK", "").strip() or None
+        bot_admission_timeout_seconds = int(values.get("BOT_ADMISSION_TIMEOUT_SECONDS", "300"))
         if not phowhisper_model:
             raise ConfigurationError("PHOWHISPER_MODEL must not be empty")
         if not whisper_model:
@@ -51,6 +61,8 @@ class Settings:
             raise ConfigurationError("MODEL_DEVICE must be one of: auto, cpu, cuda")
         if not meeting_data_dir:
             raise ConfigurationError("MEETING_DATA_DIR must not be empty")
+        if bot_admission_timeout_seconds < 1:
+            raise ConfigurationError("BOT_ADMISSION_TIMEOUT_SECONDS must be positive")
         return cls(
             phowhisper_model=phowhisper_model,
             whisper_model=whisper_model,
@@ -59,6 +71,9 @@ class Settings:
             model_device=model_device,
             huggingface_token=huggingface_token,
             meeting_data_dir=Path(meeting_data_dir).expanduser().resolve(),
+            bot_chrome_path=Path(bot_chrome_path).expanduser().resolve() if bot_chrome_path else None,
+            bot_audio_sink=bot_audio_sink,
+            bot_admission_timeout_seconds=bot_admission_timeout_seconds,
         )
 
 
