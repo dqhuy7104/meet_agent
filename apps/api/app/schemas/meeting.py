@@ -29,6 +29,7 @@ class MeetingMetadataResponse(BaseModel):
     duration_seconds: float | None
     failure_code: str | None
     pipeline_pid: int | None
+    source: str
 
 
 class MeetingListResponse(BaseModel):
@@ -42,6 +43,7 @@ class MeetingAudioFileResponse(BaseModel):
     ordinal: int
     original_filename: str
     duration_seconds: float | None
+    start_seconds: float | None
 
 
 class MeetingDetailResponse(MeetingMetadataResponse):

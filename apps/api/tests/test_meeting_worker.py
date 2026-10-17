@@ -137,6 +137,31 @@ class MeetingWorkerTest(unittest.TestCase):
         self.assertEqual(detail.meeting.failure_code, "audio_too_long")
         self.assertEqual(detail.transcript_segments, [])
 
+    def test_bot_source_preserves_part_gap_and_exceeds_thirty_minutes(self) -> None:
+        first = publish_audio(self.data_dir, b"first")
+        second = publish_audio(self.data_dir, b"second")
+        self.repository.create_meeting(
+            "bot", None, "part.wav", first, "checksum", None,
+            audio_files=[("first.wav", first), ("second.wav", second)], source="google_meet_bot",
+        )
+        self.connection.execute(
+            "UPDATE meeting_audio_files SET start_seconds=CASE ordinal WHEN 0 THEN 0 ELSE 1200 END WHERE meeting_id='bot'"
+        )
+        self.connection.commit()
+        self.repository.cancel("m1")
+        with patch("app.services.meetings.worker.process_audio", return_value=_result().model_copy(
+            update={"duration_seconds": 1000.0}
+        )):
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+        detail = self.repository.get_detail("bot")
+        self.assertEqual(detail.meeting.source, "google_meet_bot")
+        self.assertEqual(detail.meeting.duration_seconds, 2200.0)
+        self.assertEqual([part.start_seconds for part in detail.audio_files], [0.0, 1200.0])
+        self.assertEqual([segment.start for segment in detail.transcript_segments], [0.0, 1200.0])
+
+    def test_upload_source_still_rejects_combined_duration_over_thirty_minutes(self) -> None:
+        self.test_multi_file_meeting_over_duration_limit_has_no_partial_results()
+
     def test_worker_maps_known_and_unknown_failures_to_safe_codes(self) -> None:
         failures = [
             (InvalidAudioError("bad"), "invalid_audio"),

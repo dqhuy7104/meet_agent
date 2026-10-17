@@ -26,6 +26,7 @@ def _create_meetings_table(connection: sqlite3.Connection, table_name: str) -> N
             pipeline_pid INTEGER,
             pipeline_start_ticks INTEGER,
             cancelled_at TEXT
+            ,source TEXT NOT NULL DEFAULT 'upload'
         )"""
     )
 
@@ -89,6 +90,7 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 pipeline_pid INTEGER,
                 pipeline_start_ticks INTEGER,
                 cancelled_at TEXT
+                ,source TEXT NOT NULL DEFAULT 'upload'
             );
             CREATE TABLE IF NOT EXISTS vad_segments (
                 meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
@@ -121,6 +123,7 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 original_filename TEXT NOT NULL,
                 storage_key TEXT NOT NULL UNIQUE,
                 duration_seconds REAL,
+                start_seconds REAL,
                 PRIMARY KEY (meeting_id, ordinal)
             );
             CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
@@ -130,6 +133,12 @@ def initialize_meeting_store(data_dir: Path) -> None:
             """
         )
         _migrate_meetings_table(connection)
+        meeting_columns = {row[1] for row in connection.execute("PRAGMA table_info(meetings)")}
+        if "source" not in meeting_columns:
+            connection.execute("ALTER TABLE meetings ADD COLUMN source TEXT NOT NULL DEFAULT 'upload'")
+        audio_columns = {row[1] for row in connection.execute("PRAGMA table_info(meeting_audio_files)")}
+        if "start_seconds" not in audio_columns:
+            connection.execute("ALTER TABLE meeting_audio_files ADD COLUMN start_seconds REAL")
         connection.execute(
             """INSERT OR IGNORE INTO meeting_audio_files (meeting_id, ordinal, original_filename, storage_key)
                SELECT id, 0, original_filename, storage_key FROM meetings WHERE status != 'cancelled'"""

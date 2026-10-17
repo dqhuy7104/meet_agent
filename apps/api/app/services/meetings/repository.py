@@ -33,6 +33,7 @@ class MeetingAudioFile:
     original_filename: str
     storage_key: str
     duration_seconds: float | None
+    start_seconds: float | None
 
 
 @dataclass(frozen=True)
@@ -53,6 +54,7 @@ class MeetingRecord:
     pipeline_pid: int | None
     pipeline_start_ticks: int | None
     cancelled_at: str | None
+    source: str
 
 
 @dataclass(frozen=True)
@@ -93,6 +95,7 @@ class MeetingRepository:
         checksum: str,
         idempotency_key: str | None,
         audio_files: list[tuple[str, str]] | None = None,
+        source: str = "upload",
     ) -> MeetingRecord:
         now = datetime.now(timezone.utc).isoformat()
         try:
@@ -100,9 +103,9 @@ class MeetingRepository:
                 self.connection.execute(
                     """INSERT INTO meetings
                     (id, title, original_filename, storage_key, checksum, idempotency_key,
-                     created_at, updated_at, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued')""",
-                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now),
+                     created_at, updated_at, status, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)""",
+                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now, source),
                 )
                 for ordinal, (part_filename, part_key) in enumerate(audio_files or [(filename, storage_key)]):
                     self.connection.execute(
@@ -122,7 +125,7 @@ class MeetingRepository:
 
     def get_audio_files(self, meeting_id: str) -> list[MeetingAudioFile]:
         rows = self.connection.execute(
-            """SELECT ordinal, original_filename, storage_key, duration_seconds
+            """SELECT ordinal, original_filename, storage_key, duration_seconds, start_seconds
                FROM meeting_audio_files WHERE meeting_id=? ORDER BY ordinal""", (meeting_id,),
         ).fetchall()
         return [MeetingAudioFile(**dict(row)) for row in rows]
@@ -181,11 +184,14 @@ class MeetingRepository:
             if meeting is None or meeting.status != "processing":
                 return
             if durations is not None:
+                upload_offset = 0.0
                 for ordinal, duration in enumerate(durations):
                     self.connection.execute(
-                        "UPDATE meeting_audio_files SET duration_seconds=? WHERE meeting_id=? AND ordinal=?",
-                        (duration, meeting_id, ordinal),
+                        """UPDATE meeting_audio_files SET duration_seconds=?,
+                           start_seconds=COALESCE(start_seconds, ?) WHERE meeting_id=? AND ordinal=?""",
+                        (duration, upload_offset, meeting_id, ordinal),
                     )
+                    upload_offset += duration
             self._clear_results(meeting_id)
             for ordinal, segment in enumerate(result.vad_segments):
                 self.connection.execute(

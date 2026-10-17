@@ -68,7 +68,7 @@ def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, sta
             return
         try:
             parts = repository.get_audio_files(meeting_id)
-            result, durations = process_meeting_parts(parts, data_dir, ModelRegistry(settings))
+            result, durations = process_meeting_parts(parts, data_dir, ModelRegistry(settings), meeting.source)
             repository.complete(meeting.id, result, durations)
         except AudioTooLongError:
             repository.fail(meeting.id, "audio_too_long")
@@ -88,11 +88,13 @@ def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, sta
 
 def process_meeting_parts(
     parts: list[MeetingAudioFile], data_dir: Path, models: ModelRegistry,
+    source: str = "upload",
 ) -> tuple[AudioProcessResponse, list[float]]:
     """Process ordered recordings and shift segments to meeting time."""
     if not parts:
         raise InvalidAudioError("Meeting has no audio files")
     offset = 0.0
+    total_end = 0.0
     durations: list[float] = []
     transcripts: list[str] = []
     vad_segments: list[SpeechSegment] = []
@@ -101,26 +103,32 @@ def process_meeting_parts(
     for part in parts:
         data = audio_path(data_dir, part.storage_key).read_bytes()
         result = process_audio(data, part.original_filename, models)
-        if offset + result.duration_seconds > 30 * 60:
+        if result.duration_seconds > 30 * 60:
+            raise AudioTooLongError("Audio part must be at most 30 minutes long")
+        part_start = part.start_seconds if source == "google_meet_bot" else offset
+        if part_start is None or part_start < 0:
+            raise InvalidAudioError("Meeting part has no valid start time")
+        if source == "upload" and offset + result.duration_seconds > 30 * 60:
             raise AudioTooLongError("Meeting audio must be at most 30 minutes long")
         speaker_prefix = f"PART_{part.ordinal + 1}_" if part.ordinal else ""
         vad_segments.extend(segment.model_copy(update={
-            "start": segment.start + offset, "end": segment.end + offset,
+            "start": segment.start + part_start, "end": segment.end + part_start,
         }) for segment in result.vad_segments)
         diarization_segments.extend(segment.model_copy(update={
-            "start": segment.start + offset, "end": segment.end + offset,
+            "start": segment.start + part_start, "end": segment.end + part_start,
             "speaker": speaker_prefix + segment.speaker,
         }) for segment in result.diarization_segments)
         transcript_segments.extend(segment.model_copy(update={
-            "start": segment.start + offset, "end": segment.end + offset,
+            "start": segment.start + part_start, "end": segment.end + part_start,
             "speaker": speaker_prefix + segment.speaker,
         }) for segment in result.transcript_segments)
         if result.transcript:
             transcripts.append(result.transcript)
         durations.append(result.duration_seconds)
         offset += result.duration_seconds
+        total_end = max(total_end, part_start + result.duration_seconds)
     return AudioProcessResponse(
-        filename=parts[0].original_filename, duration_seconds=offset,
+        filename=parts[0].original_filename, duration_seconds=total_end,
         transcript=" ".join(transcripts), vad_segments=vad_segments,
         diarization_segments=diarization_segments, transcript_segments=transcript_segments,
     ), durations

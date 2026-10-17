@@ -96,6 +96,7 @@ def _metadata(record: MeetingRecord) -> MeetingMetadataResponse:
         created_at=record.created_at, updated_at=record.updated_at, status=record.status,
         attempt_count=record.attempt_count, duration_seconds=record.duration_seconds,
         failure_code=record.failure_code, pipeline_pid=record.pipeline_pid,
+        source=record.source,
     )
 
 
@@ -224,6 +225,7 @@ async def get_meeting(
         audio_files=[MeetingAudioFileResponse(
             ordinal=part.ordinal, original_filename=part.original_filename,
             duration_seconds=part.duration_seconds,
+            start_seconds=part.start_seconds,
         ) for part in detail.audio_files],
     )
 

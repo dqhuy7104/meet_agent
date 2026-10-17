@@ -35,6 +35,15 @@ class MeetingStoreTest(unittest.TestCase):
         self.assertEqual(self.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
         self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_fts").fetchone()[0], 0)
 
+    def test_existing_meeting_migrates_with_upload_source(self) -> None:
+        key = publish_audio(self.data_dir, b"old audio")
+        self.repository.create_meeting("old", None, "old.wav", key, "checksum", None)
+        self.connection.execute("ALTER TABLE meetings DROP COLUMN source")
+        self.connection.execute("ALTER TABLE meeting_audio_files DROP COLUMN start_seconds")
+        self.connection.commit()
+        initialize_meeting_store(self.data_dir)
+        self.assertEqual(self.repository.get_meeting("old").source, "upload")
+
     def test_publish_uses_opaque_private_name(self) -> None:
         key = publish_audio(self.data_dir, b"private recording")
         self.assertNotIn("meeting", key)
