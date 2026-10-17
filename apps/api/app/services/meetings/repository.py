@@ -24,6 +24,16 @@ class CancelledMeeting:
     storage_key: str
     pipeline_pid: int | None
     pipeline_start_ticks: int | None
+    other_storage_keys: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class MeetingAudioFile:
+    ordinal: int
+    original_filename: str
+    storage_key: str
+    duration_seconds: float | None
+    start_seconds: float | None
 
 
 @dataclass(frozen=True)
@@ -44,6 +54,7 @@ class MeetingRecord:
     pipeline_pid: int | None
     pipeline_start_ticks: int | None
     cancelled_at: str | None
+    source: str
 
 
 @dataclass(frozen=True)
@@ -52,6 +63,7 @@ class MeetingDetail:
     vad_segments: list[SpeechSegment]
     diarization_segments: list[SpeakerTurn]
     transcript_segments: list[TranscriptSegment]
+    audio_files: list[MeetingAudioFile]
 
 
 @dataclass(frozen=True)
@@ -82,6 +94,8 @@ class MeetingRepository:
         storage_key: str,
         checksum: str,
         idempotency_key: str | None,
+        audio_files: list[tuple[str, str]] | None = None,
+        source: str = "upload",
     ) -> MeetingRecord:
         now = datetime.now(timezone.utc).isoformat()
         try:
@@ -89,10 +103,16 @@ class MeetingRepository:
                 self.connection.execute(
                     """INSERT INTO meetings
                     (id, title, original_filename, storage_key, checksum, idempotency_key,
-                     created_at, updated_at, status)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued')""",
-                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now),
+                     created_at, updated_at, status, source)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)""",
+                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now, source),
                 )
+                for ordinal, (part_filename, part_key) in enumerate(audio_files or [(filename, storage_key)]):
+                    self.connection.execute(
+                        """INSERT INTO meeting_audio_files
+                           (meeting_id, ordinal, original_filename, storage_key) VALUES (?, ?, ?, ?)""",
+                        (meeting_id, ordinal, part_filename, part_key),
+                    )
         except sqlite3.IntegrityError as error:
             if idempotency_key and self.find_by_idempotency_key(idempotency_key):
                 raise IdempotencyConflict(idempotency_key) from error
@@ -102,6 +122,13 @@ class MeetingRepository:
     def get_meeting(self, meeting_id: str) -> MeetingRecord | None:
         row = self.connection.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
         return _record(row) if row else None
+
+    def get_audio_files(self, meeting_id: str) -> list[MeetingAudioFile]:
+        rows = self.connection.execute(
+            """SELECT ordinal, original_filename, storage_key, duration_seconds, start_seconds
+               FROM meeting_audio_files WHERE meeting_id=? ORDER BY ordinal""", (meeting_id,),
+        ).fetchall()
+        return [MeetingAudioFile(**dict(row)) for row in rows]
 
     def find_by_idempotency_key(self, key: str) -> MeetingRecord | None:
         row = self.connection.execute("SELECT * FROM meetings WHERE idempotency_key = ?", (key,)).fetchone()
@@ -150,12 +177,21 @@ class MeetingRepository:
         for table in ("transcript_segments", "diarization_segments", "vad_segments"):
             self.connection.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
 
-    def complete(self, meeting_id: str, result: AudioProcessResponse) -> None:
+    def complete(self, meeting_id: str, result: AudioProcessResponse, durations: list[float] | None = None) -> None:
         """Replace all derived rows and publish completion atomically."""
         with self.connection:
             meeting = self.get_meeting(meeting_id)
             if meeting is None or meeting.status != "processing":
                 return
+            if durations is not None:
+                upload_offset = 0.0
+                for ordinal, duration in enumerate(durations):
+                    self.connection.execute(
+                        """UPDATE meeting_audio_files SET duration_seconds=?,
+                           start_seconds=COALESCE(start_seconds, ?) WHERE meeting_id=? AND ordinal=?""",
+                        (duration, upload_offset, meeting_id, ordinal),
+                    )
+                    upload_offset += duration
             self._clear_results(meeting_id)
             for ordinal, segment in enumerate(result.vad_segments):
                 self.connection.execute(
@@ -223,9 +259,13 @@ class MeetingRepository:
                 storage_key=meeting.storage_key,
                 pipeline_pid=meeting.pipeline_pid,
                 pipeline_start_ticks=meeting.pipeline_start_ticks,
+                other_storage_keys=tuple(
+                    part.storage_key for part in self.get_audio_files(meeting_id) if part.ordinal > 0
+                ),
             )
             if meeting.status != "cancelled":
                 self._clear_results(meeting_id)
+                self.connection.execute("DELETE FROM meeting_audio_files WHERE meeting_id=?", (meeting_id,))
                 self.connection.execute(
                     """UPDATE meetings SET status='cancelled', failure_code=NULL, duration_seconds=NULL,
                        transcript=NULL, cancelled_at=?, updated_at=? WHERE id=?""",
@@ -269,7 +309,7 @@ class MeetingRepository:
         if meeting is None:
             return None
         if meeting.status != "completed":
-            return MeetingDetail(meeting, [], [], [])
+            return MeetingDetail(meeting, [], [], [], self.get_audio_files(meeting_id))
         vad = [
             SpeechSegment(start=row["start_seconds"], end=row["end_seconds"])
             for row in self.connection.execute(
@@ -296,7 +336,7 @@ class MeetingRepository:
                 (meeting_id,),
             )
         ]
-        return MeetingDetail(meeting, vad, turns, transcripts)
+        return MeetingDetail(meeting, vad, turns, transcripts, self.get_audio_files(meeting_id))
 
     def delete(self, meeting_id: str) -> str | None:
         """Remove database rows atomically and return the audio storage key."""

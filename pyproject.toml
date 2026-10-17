@@ -14,4 +14,5 @@ dependencies = [
   "torchaudio",
   "transformers",
   "uvicorn",
+  "playwright>=1.64.0",
 ]

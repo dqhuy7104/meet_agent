@@ -26,6 +26,7 @@ def _create_meetings_table(connection: sqlite3.Connection, table_name: str) -> N
             pipeline_pid INTEGER,
             pipeline_start_ticks INTEGER,
             cancelled_at TEXT
+            ,source TEXT NOT NULL DEFAULT 'upload'
         )"""
     )
 
@@ -65,7 +66,7 @@ def open_meeting_db(data_dir: Path) -> sqlite3.Connection:
 
 def initialize_meeting_store(data_dir: Path) -> None:
     """Create private storage directories and the SQLite schema."""
-    for directory in (data_dir, data_dir / "audio", data_dir / "tmp"):
+    for directory in (data_dir, data_dir / "audio", data_dir / "tmp", data_dir / "bot-tmp"):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         directory.chmod(0o700)
     connection = open_meeting_db(data_dir)
@@ -89,6 +90,7 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 pipeline_pid INTEGER,
                 pipeline_start_ticks INTEGER,
                 cancelled_at TEXT
+                ,source TEXT NOT NULL DEFAULT 'upload'
             );
             CREATE TABLE IF NOT EXISTS vad_segments (
                 meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
@@ -115,6 +117,40 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 text TEXT NOT NULL,
                 UNIQUE (meeting_id, ordinal)
             );
+            CREATE TABLE IF NOT EXISTS meeting_audio_files (
+                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                original_filename TEXT NOT NULL,
+                storage_key TEXT NOT NULL UNIQUE,
+                duration_seconds REAL,
+                start_seconds REAL,
+                PRIMARY KEY (meeting_id, ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS bot_sessions (
+                id TEXT PRIMARY KEY,
+                url TEXT,
+                url_hash TEXT NOT NULL,
+                title TEXT,
+                idempotency_key TEXT UNIQUE,
+                status TEXT NOT NULL CHECK(status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing', 'completed', 'interrupted', 'cancelled')),
+                failure_code TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                ended_at TEXT,
+                stop_requested INTEGER NOT NULL DEFAULT 0,
+                meeting_id TEXT REFERENCES meetings(id),
+                capture_incomplete INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS bot_session_parts (
+                session_id TEXT NOT NULL REFERENCES bot_sessions(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                storage_key TEXT NOT NULL UNIQUE,
+                start_seconds REAL NOT NULL,
+                duration_seconds REAL NOT NULL,
+                PRIMARY KEY (session_id, ordinal)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS one_active_bot_session ON bot_sessions((1))
+                WHERE status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing');
             CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
                 meeting_id UNINDEXED, segment_id UNINDEXED, text, tokenize='unicode61'
             );
@@ -122,6 +158,16 @@ def initialize_meeting_store(data_dir: Path) -> None:
             """
         )
         _migrate_meetings_table(connection)
+        meeting_columns = {row[1] for row in connection.execute("PRAGMA table_info(meetings)")}
+        if "source" not in meeting_columns:
+            connection.execute("ALTER TABLE meetings ADD COLUMN source TEXT NOT NULL DEFAULT 'upload'")
+        audio_columns = {row[1] for row in connection.execute("PRAGMA table_info(meeting_audio_files)")}
+        if "start_seconds" not in audio_columns:
+            connection.execute("ALTER TABLE meeting_audio_files ADD COLUMN start_seconds REAL")
+        connection.execute(
+            """INSERT OR IGNORE INTO meeting_audio_files (meeting_id, ordinal, original_filename, storage_key)
+               SELECT id, 0, original_filename, storage_key FROM meetings WHERE status != 'cancelled'"""
+        )
         connection.commit()
     finally:
         connection.close()

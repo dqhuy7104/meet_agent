@@ -31,6 +31,8 @@ import {
   X,
 } from "lucide-react";
 import { ApiError, meetingApi, type BackendMeeting } from "./lib/api";
+import { MeetBotPanel } from "./components/MeetBotPanel";
+import { findAudioPartAtTime } from "./lib/timeline";
 import type { ApiMeeting, MeetingStatus } from "./types/meeting";
 
 const labels: Record<MeetingStatus, string> = {
@@ -38,6 +40,7 @@ const labels: Record<MeetingStatus, string> = {
   processing: "Đang xử lý",
   queued: "Đang chờ",
   failed: "Cần thử lại",
+  cancelled: "Đã xoá",
 };
 const time = (seconds: number) =>
   `${Math.floor(seconds / 60)}:${String(Math.floor(seconds % 60)).padStart(2, "0")}`;
@@ -132,8 +135,9 @@ function useMeetingLibrary() {
   const load = useCallback(async (signal?: AbortSignal) => {
     try {
       const page = await meetingApi.list(signal);
-      setItems(page.items);
-      setTotal(page.total);
+      const visibleItems = page.items.filter((meeting) => meeting.status !== "cancelled");
+      setItems(visibleItems);
+      setTotal(visibleItems.length);
       setError("");
     } catch (cause) {
       if (!signal?.aborted)
@@ -149,14 +153,18 @@ function useMeetingLibrary() {
     void load(controller.signal);
     return () => controller.abort();
   }, [load]);
-  return { items, total, error, reload: () => void load() };
+  const removeFromLibrary = useCallback((meetingId: string) => {
+    setItems((current) => current?.filter((meeting) => meeting.id !== meetingId) ?? null);
+    setTotal((current) => Math.max(0, current - 1));
+  }, []);
+  return { items, total, error, reload: () => void load(), removeFromLibrary };
 }
 function MeetingRow({
   meeting,
   onRemoved,
 }: {
   meeting: ApiMeeting;
-  onRemoved?: () => void;
+  onRemoved?: (meetingId: string) => void;
 }) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState("");
@@ -166,7 +174,7 @@ function MeetingRow({
     setDeleteError("");
     try {
       await meetingApi.remove(meeting.id);
-      onRemoved?.();
+      onRemoved?.(meeting.id);
     } catch (cause) {
       setDeleteError(cause instanceof ApiError ? cause.message : "Không thể xóa cuộc họp local.");
     } finally {
@@ -180,11 +188,9 @@ function MeetingRow({
         <div><b>{title(meeting)}</b><small>{date(meeting)} · {duration(meeting.duration_seconds)}</small></div>
         <p>{meeting.original_filename}</p><span /><Status status={meeting.status} />
       </NavLink>
-      {meeting.status !== "processing" && (
-        <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting} aria-label={`Xóa ${title(meeting)}`} title={deleteError || "Xóa cuộc họp"}>
-          <Trash2 size={16} /> {isDeleting ? "Đang xóa..." : "Xóa"}
-        </button>
-      )}
+      <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting} aria-label={`Xóa ${title(meeting)}`} title={deleteError || "Xóa cuộc họp"}>
+        <Trash2 size={16} /> {isDeleting ? "Đang xóa..." : "Xóa"}
+      </button>
     </div>
   );
 }
@@ -228,7 +234,7 @@ function Stat({
   );
 }
 function Dashboard() {
-  const { items, total, error, reload } = useMeetingLibrary();
+  const { items, total, error, reload, removeFromLibrary } = useMeetingLibrary();
   if (error)
     return (
       <div className="page">
@@ -298,7 +304,7 @@ function Dashboard() {
         {items.length ? (
           items
             .slice(0, 4)
-            .map((meeting) => <MeetingRow meeting={meeting} key={meeting.id} onRemoved={reload} />)
+            .map((meeting) => <MeetingRow meeting={meeting} key={meeting.id} onRemoved={removeFromLibrary} />)
         ) : (
           <div className="empty">
             <FileAudio />
@@ -317,28 +323,30 @@ function UploadModal({
   close: () => void;
   onUploaded: (id: string) => void;
 }) {
-  const [file, setFile] = useState<File>();
+  const [files, setFiles] = useState<File[]>([]);
   const [meetingTitle, setMeetingTitle] = useState("");
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
   const input = useRef<HTMLInputElement>(null);
-  const select = (next?: File) => {
-    if (!next) return;
-    if (!next.type.startsWith("audio/") || next.size > 25 * 1024 * 1024) {
-      setMessage("Chọn file audio hợp lệ, tối đa 25 MiB.");
+  const select = (selected: FileList | null) => {
+    const next = Array.from(selected ?? []);
+    if (!next.length) return;
+    if (next.length > 10 || next.some((file) => !file.type.startsWith("audio/") || !file.size || file.size > 25 * 1024 * 1024) || next.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
+      setFiles([]);
+      setMessage("Chọn tối đa 10 file audio, mỗi file tối đa 25 MiB và tổng tối đa 100 MiB.");
       return;
     }
-    setFile(next);
+    setFiles(next);
     setMessage("");
   };
   const send = async () => {
-    if (!file) {
-      setMessage("Chọn một file audio để tiếp tục.");
+    if (!files.length) {
+      setMessage("Chọn ít nhất một file audio để tiếp tục.");
       return;
     }
     setBusy(true);
     try {
-      const meeting = await meetingApi.upload(file, meetingTitle);
+      const meeting = await meetingApi.upload(files, meetingTitle);
       onUploaded(meeting.meeting_id);
     } catch (cause) {
       setMessage(
@@ -364,28 +372,29 @@ function UploadModal({
         <mark>LOCAL UPLOAD</mark>
         <h2 id="upload-title">Tải bản ghi lên</h2>
         <p>
-          File được gửi đến meeting library trên máy local. Giới hạn 25 MiB.
+          Chọn tối đa 10 phần ghi âm theo thứ tự phát. Mỗi file tối đa 25 MiB, tổng tối đa 100 MiB.
         </p>
         <label
           className="drop"
           onDragOver={(event) => event.preventDefault()}
           onDrop={(event) => {
             event.preventDefault();
-            select(event.dataTransfer.files[0]);
+            select(event.dataTransfer.files);
           }}
         >
           <input
             ref={input}
             type="file"
             accept="audio/*"
-            onChange={(event) => select(event.target.files?.[0])}
+            multiple
+            onChange={(event) => select(event.target.files)}
           />
           <UploadIcon size={26} />
-          <b>{file ? file.name : "Kéo thả audio vào đây"}</b>
+          <b>{files.length ? `${files.length} file đã chọn` : "Kéo thả audio vào đây"}</b>
           <small>
-            {file
-              ? `${(file.size / 1048576).toFixed(1)} MiB · sẵn sàng tải lên`
-              : "hoặc chọn file từ máy tính"}
+            {files.length
+              ? files.map((file, index) => `${index + 1}. ${file.name}`).join(" · ")
+              : "hoặc chọn nhiều file từ máy tính"}
           </small>
           <button
             type="button"
@@ -394,7 +403,7 @@ function UploadModal({
               input.current?.click();
             }}
           >
-            Chọn file
+            Chọn file audio
           </button>
         </label>
         <label className="input">
@@ -423,7 +432,7 @@ function Meetings() {
   const [filter, setFilter] = useState<MeetingStatus | "all">("all");
   const [open, setOpen] = useState(false);
   const navigate = useNavigate();
-  const { items, error, reload } = useMeetingLibrary();
+  const { items, error, reload, removeFromLibrary } = useMeetingLibrary();
   const matching =
     items?.filter(
       (meeting) =>
@@ -438,13 +447,13 @@ function Meetings() {
         <div>
           <small>THƯ VIỆN</small>
           <h2>Cuộc họp của bạn</h2>
-          <p>Tải lên và xem lại các bản ghi được xử lý trên máy local.</p>
         </div>
         <button className="primary" onClick={() => setOpen(true)}>
           <Plus />
           Cuộc họp mới
         </button>
       </section>
+      <MeetBotPanel />
       <div className="toolbar">
         <label>
           <Search size={18} />
@@ -478,7 +487,7 @@ function Meetings() {
       ) : matching.length ? (
         <section className="library">
           {matching.map((meeting) => (
-            <MeetingRow meeting={meeting} key={meeting.id} onRemoved={reload} />
+            <MeetingRow meeting={meeting} key={meeting.id} onRemoved={removeFromLibrary} />
           ))}
         </section>
       ) : (
@@ -517,7 +526,7 @@ function LocalWorkspace({ id }: { id: string }) {
   const [isDeleting, setIsDeleting] = useState(false);
   const [query, setQuery] = useState("");
   const navigate = useNavigate();
-  const audio = useRef<HTMLAudioElement>(null);
+  const audios = useRef<(HTMLAudioElement | null)[]>([]);
   const load = useCallback(
     async (signal?: AbortSignal) => {
       try {
@@ -553,9 +562,20 @@ function LocalWorkspace({ id }: { id: string }) {
     };
   }, [load]);
   const seek = (seconds: number) => {
-    if (audio.current) {
-      audio.current.currentTime = seconds;
-      void audio.current.play().catch(() => undefined);
+    const parts = meeting?.audio_files ?? [];
+    let uploadOffset = 0;
+    const timing = parts.map((part) => {
+      const start_seconds = part.start_seconds ?? uploadOffset;
+      const duration_seconds = part.duration_seconds ?? 0;
+      uploadOffset += duration_seconds;
+      return { start_seconds, duration_seconds };
+    });
+    const index = findAudioPartAtTime(timing, seconds);
+    if (index === null) return;
+    const player = audios.current[parts[index].ordinal];
+    if (player) {
+      player.currentTime = seconds - timing[index].start_seconds;
+      void player.play().catch(() => undefined);
     }
   };
   const remove = async () => {
@@ -606,12 +626,10 @@ function LocalWorkspace({ id }: { id: string }) {
           <h2>{title(meeting)}</h2>
         </div>
         <Status status={meeting.status} />
-        {meeting.status !== "processing" && (
-          <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting}>
-            <Trash2 size={16} />
-            {isDeleting ? "Đang xóa..." : "Xóa"}
-          </button>
-        )}
+        <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting}>
+          <Trash2 size={16} />
+          {isDeleting ? "Đang xóa..." : "Xóa"}
+        </button>
       </section>
       {deleteError && <p className="message" role="alert">{deleteError}</p>}
       {meeting.status !== "completed" ? (
@@ -638,7 +656,20 @@ function LocalWorkspace({ id }: { id: string }) {
                   <h3>Bản ghi từ meeting library</h3>
                 </div>
               </div>
-              <audio ref={audio} controls src={meetingApi.audioUrl(id)} />
+              {meeting.audio_files.map((part) => (
+                <div key={part.ordinal}>
+                  {meeting.audio_files.length > 1 && <p>{part.ordinal + 1}. {part.original_filename} · từ {time(part.start_seconds ?? 0)}</p>}
+                  <audio
+                    ref={(node) => { audios.current[part.ordinal] = node; }}
+                    controls
+                    aria-label={`Audio phần ${part.ordinal + 1}: ${part.original_filename}`}
+                    src={meetingApi.audioUrl(id, part.ordinal)}
+                    onPlay={() => audios.current.forEach((other, index) => {
+                      if (index !== part.ordinal) other?.pause();
+                    })}
+                  />
+                </div>
+              ))}
             </div>
             <div className="transcript-title">
               <div>
