@@ -142,7 +142,7 @@ class BotSessionRepository:
             ended_at = _now() if status in {"interrupted", "cancelled"} else None
             self.connection.execute(
                 """UPDATE bot_sessions SET status=?, failure_code=?, ended_at=COALESCE(?, ended_at),
-                   url=CASE WHEN ?='cancelled' THEN NULL ELSE url END WHERE id=?""",
+                   url=CASE WHEN ? IN ('cancelled','interrupted') THEN NULL ELSE url END WHERE id=?""",
                 (status, failure_code, ended_at, status, session_id),
             )
             self.connection.commit()
@@ -246,7 +246,8 @@ class BotSessionRepository:
     def recover_stale(self) -> int:
         with self.connection:
             cursor = self.connection.execute(
-                """UPDATE bot_sessions SET status='interrupted', failure_code='runner_interrupted', ended_at=?
+                """UPDATE bot_sessions SET status='interrupted', failure_code='runner_interrupted',
+                   ended_at=?, url=NULL
                    WHERE status IN ('joining','waiting_admission','recording','finalizing')""", (_now(),)
             )
         return cursor.rowcount

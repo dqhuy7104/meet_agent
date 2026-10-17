@@ -108,6 +108,7 @@ class BotRepositoryTest(unittest.TestCase):
         self.repository.add_part(session.id, key, 0, 1)
         self.assertEqual(self.repository.recover_stale(), 1)
         self.assertEqual(self.repository.get(session.id).status, "interrupted")
+        self.assertIsNone(self.repository.get(session.id).url)
         self.assertEqual(self.repository.discard(session.id), (key,))
         self.assertEqual(self.repository.get(session.id).status, "cancelled")
         self.assertIsNone(self.repository.get(session.id).url)
