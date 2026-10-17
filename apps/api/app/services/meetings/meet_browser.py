@@ -58,14 +58,13 @@ class ChromeMeetBrowser:
             await self._page.goto(url, wait_until="domcontentloaded", timeout=30000)
             if "accounts.google.com" in self._page.url:
                 raise JoinFailed("account_challenge")
+            await self._disable_device(_MIC_ON, _MIC_OFF)
+            await self._disable_device(_CAM_ON, _CAM_OFF)
             name_field = self._page.get_by_role("textbox", name=_NAME)
             if await name_field.is_visible():
                 await name_field.fill("Meeting AI Recorder")
-            await self._disable_device(_MIC_ON, _MIC_OFF)
-            await self._disable_device(_CAM_ON, _CAM_OFF)
             join_button = self._page.get_by_role("button", name=_JOIN)
-            if not await join_button.is_visible():
-                raise JoinFailed("join_control_unavailable")
+            await self._wait_visible(join_button, 30, "join_control_unavailable")
             await join_button.click()
         except JoinFailed:
             await self.close()
@@ -76,11 +75,31 @@ class ChromeMeetBrowser:
 
     async def _disable_device(self, on_pattern: re.Pattern[str], off_pattern: re.Pattern[str]) -> None:
         on_button = self._page.get_by_role("button", name=on_pattern)
-        if await on_button.is_visible():
-            await on_button.click()
         off_button = self._page.get_by_role("button", name=off_pattern)
-        if not await off_button.is_visible():
-            raise JoinFailed("device_state_unconfirmed")
+        deadline = time.monotonic() + 30
+        while time.monotonic() < deadline:
+            if await off_button.is_visible():
+                return
+            if await on_button.is_visible():
+                await on_button.click()
+                await self._wait_visible(off_button, 5, "device_state_unconfirmed")
+                return
+            await self._check_page_ready()
+            await asyncio.sleep(self._poll_seconds)
+        raise JoinFailed("device_state_unconfirmed")
+
+    async def _wait_visible(self, locator: Any, timeout_seconds: int, failure_code: str) -> None:
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if await locator.is_visible():
+                return
+            await self._check_page_ready()
+            await asyncio.sleep(self._poll_seconds)
+        raise JoinFailed(failure_code)
+
+    async def _check_page_ready(self) -> None:
+        if self._page.is_closed() or "accounts.google.com" in self._page.url:
+            raise JoinFailed("account_challenge_or_browser_closed")
 
     async def wait_for_admission(self, timeout_seconds: int, on_waiting: Callable[[], None]) -> None:
         """Confirm the in-call leave control before any recorder starts."""

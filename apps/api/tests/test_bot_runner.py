@@ -120,3 +120,28 @@ class BotRunnerTest(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(BlockingIOError):
                 with exclusive_bot_lock(self.data_dir):
                     pass
+
+    async def test_cancelling_runner_settles_active_recorder(self) -> None:
+        class WaitingRecorder:
+            def __init__(self) -> None:
+                self.entered = asyncio.Event()
+                self.finished = asyncio.Event()
+
+            async def record_part(self, temporary_path: Path, stop: asyncio.Event, max_seconds: int = 1790):
+                self.entered.set()
+                try:
+                    await stop.wait()
+                finally:
+                    self.finished.set()
+
+        recorder = WaitingRecorder()
+        browser = FakeBrowser(self.settings)
+        with patch("app.services.meetings.bot_runner.check_bot_runtime"):
+            task = asyncio.create_task(run_session(
+                self.session.id, self.data_dir, self.settings, lambda _: browser, lambda _: recorder,
+            ))
+            await asyncio.wait_for(recorder.entered.wait(), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertTrue(recorder.finished.is_set())

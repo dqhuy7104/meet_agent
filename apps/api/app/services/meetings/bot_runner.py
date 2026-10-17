@@ -67,6 +67,11 @@ async def run_session(
     repository = BotSessionRepository(connection)
     browser: ChromeMeetBrowser | None = None
     end_task: asyncio.Task[None] | None = None
+    admission_task: asyncio.Task[None] | None = None
+    stop_task: asyncio.Task[None] | None = None
+    record_task: asyncio.Task[RecordedPart] | None = None
+    stop_recording: asyncio.Event | None = None
+    temporary_path: Path | None = None
     try:
         session = repository.get(session_id)
         if session is None or session.status != "joining":
@@ -127,16 +132,30 @@ async def run_session(
         current = repository.get(session_id)
         if current and current.status not in {"completed", "cancelled", "interrupted"}:
             repository.set_status(session_id, "interrupted", str(error))
-    except (BotStateConflict, OSError, Exception):
+    except Exception:
         current = repository.get(session_id)
         if current and current.status not in {"completed", "cancelled", "interrupted"}:
             repository.set_status(session_id, "interrupted", "runner_error")
     finally:
-        if end_task is not None:
-            end_task.cancel()
-            await asyncio.gather(end_task, return_exceptions=True)
+        if stop_recording is not None:
+            stop_recording.set()
+        if record_task is not None and not record_task.done():
+            try:
+                await asyncio.wait_for(asyncio.shield(record_task), timeout=6)
+            except asyncio.TimeoutError:
+                record_task.cancel()
+        for task in (record_task, admission_task, stop_task, end_task):
+            if task is not None:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
         if browser is not None:
             await browser.close()
+        if asyncio.current_task() and asyncio.current_task().cancelling():
+            current = repository.get(session_id)
+            if current and current.status not in {"completed", "cancelled", "interrupted"}:
+                repository.set_status(session_id, "interrupted", "runner_interrupted")
         connection.close()
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import tempfile
 import unittest
 import wave
@@ -86,3 +87,32 @@ class BotCaptureTest(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(CaptureUnavailable):
                         await PulseWavRecorder(Settings(bot_audio_sink="meet_bot")).record_part(output, stop)
             self.assertFalse(output.exists())
+
+    async def test_cancelling_recording_reaps_ffmpeg_process(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "part.wav"
+            child = None
+            actual_spawn = asyncio.create_subprocess_exec
+
+            async def spawn(*args, **kwargs):
+                nonlocal child
+                child = await actual_spawn(
+                    sys.executable, "-c", "import time; time.sleep(30)",
+                    stdin=asyncio.subprocess.PIPE,
+                )
+                return child
+
+            try:
+                with patch("app.services.meetings.bot_capture.asyncio.create_subprocess_exec", side_effect=spawn):
+                    task = asyncio.create_task(PulseWavRecorder(Settings(bot_audio_sink="meet_bot")).record_part(
+                        output, asyncio.Event(),
+                    ))
+                    await asyncio.sleep(0.05)
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await task
+                self.assertIsNotNone(child.returncode)
+            finally:
+                if child and child.returncode is None:
+                    child.kill()
+                    await child.wait()

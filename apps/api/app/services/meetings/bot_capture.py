@@ -79,6 +79,10 @@ class PulseWavRecorder:
             "-i", f"{sink}.monitor", "-ar", "16000", "-ac", "1",
             "-c:a", "pcm_s16le", "-t", str(max_seconds), "-y", str(temporary_path),
         ]
+        process: asyncio.subprocess.Process | None = None
+        wait_process: asyncio.Task[int] | None = None
+        wait_stop: asyncio.Task[bool] | None = None
+        completed = False
         try:
             process = await asyncio.create_subprocess_exec(
                 *command, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
@@ -86,7 +90,7 @@ class PulseWavRecorder:
             )
             wait_process = asyncio.create_task(process.wait())
             wait_stop = asyncio.create_task(stop.wait())
-            done, pending = await asyncio.wait({wait_process, wait_stop}, return_when=asyncio.FIRST_COMPLETED)
+            done, _ = await asyncio.wait({wait_process, wait_stop}, return_when=asyncio.FIRST_COMPLETED)
             if wait_stop in done and process.returncode is None:
                 if process.stdin:
                     process.stdin.write(b"q\n")
@@ -97,8 +101,6 @@ class PulseWavRecorder:
                     process.kill()
                     await process.wait()
                     raise CaptureUnavailable("recorder_unresponsive") from error
-            for task in pending:
-                task.cancel()
             if process.returncode != 0:
                 raise CaptureUnavailable("recorder_failed")
             with wave.open(str(temporary_path), "rb") as recording:
@@ -107,10 +109,22 @@ class PulseWavRecorder:
                 duration = recording.getnframes() / recording.getframerate()
             if not 0 < duration <= 1800:
                 raise CaptureUnavailable("invalid_recording")
+            completed = True
             return RecordedPart(duration, started, time.monotonic())
         except (OSError, wave.Error) as error:
-            temporary_path.unlink(missing_ok=True)
             raise CaptureUnavailable("recorder_failed") from error
-        except BaseException:
-            temporary_path.unlink(missing_ok=True)
-            raise
+        finally:
+            if process is not None and process.returncode is None:
+                process.terminate()
+                try:
+                    await asyncio.wait_for(asyncio.shield(wait_process or process.wait()), timeout=5)
+                except asyncio.TimeoutError:
+                    process.kill()
+                    await process.wait()
+            if wait_stop is not None:
+                wait_stop.cancel()
+                await asyncio.gather(wait_stop, return_exceptions=True)
+            if wait_process is not None:
+                await asyncio.gather(wait_process, return_exceptions=True)
+            if not completed:
+                temporary_path.unlink(missing_ok=True)

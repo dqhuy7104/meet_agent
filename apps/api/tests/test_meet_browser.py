@@ -22,7 +22,10 @@ class FakeLocator:
 
     async def click(self) -> None:
         if self.name.search("Turn off microphone"):
-            self.page.mic_on = False
+            if self.page.delayed_toggle:
+                asyncio.create_task(self.page.turn_off_mic_later())
+            else:
+                self.page.mic_on = False
         elif self.name.search("Turn off camera"):
             self.page.camera_on = False
         elif self.name.search("Join now"):
@@ -41,11 +44,19 @@ class FakePage:
         self.admitted = False
         self.display_name = ""
         self.closed = False
+        self.controls_visible = True
+        self.delayed_toggle = False
+
+    async def turn_off_mic_later(self) -> None:
+        await asyncio.sleep(0.04)
+        self.mic_on = False
 
     async def goto(self, url: str, **kwargs) -> None:
         self.url = url
 
     def labels(self) -> list[str]:
+        if not self.controls_visible:
+            return []
         labels = ["Join now", "Your name"] if not self.joined else []
         if self.mic_on:
             labels.append("Turn off microphone")
@@ -154,3 +165,22 @@ class MeetBrowserTest(unittest.IsolatedAsyncioTestCase):
         self.fake.context.page.closed = True
         with self.assertRaises(JoinFailed):
             await self.browser.wait_for_end()
+
+    async def test_start_waits_for_delayed_prejoin_controls(self) -> None:
+        page = self.fake.context.page
+        page.controls_visible = False
+
+        async def show_controls() -> None:
+            await asyncio.sleep(0.04)
+            page.controls_visible = True
+
+        show_task = asyncio.create_task(show_controls())
+        await self.browser.start("https://meet.google.com/abc-defg-hij")
+        await show_task
+        self.assertTrue(page.joined)
+
+    async def test_start_waits_for_disabled_device_confirmation(self) -> None:
+        page = self.fake.context.page
+        page.delayed_toggle = True
+        await self.browser.start("https://meet.google.com/abc-defg-hij")
+        self.assertFalse(page.mic_on)
