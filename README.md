@@ -61,7 +61,7 @@ npm run dev
 ```
 
 Open the URL printed by Vite (normally `http://localhost:5173/app/`). For a
-For a production bundle run `npm run build`. Vite proxies `/api` to the local
+production bundle run `npm run build`. Vite proxies `/api` to the local
 API while developing, so the typed client can use the local meeting routes.
 `dist/` is generated and not source data. The client does not place audio or
 transcript content in browser storage.
@@ -113,6 +113,70 @@ backups. For a consistent backup, stop both API and worker, then copy the
 entire data directory. To roll back, stop both processes, preserve or export
 that directory, and revert the new meeting routes and schema; the original
 audio processing endpoint remains independent.
+
+## Local Google Meet recording bot
+
+The bot runs on the same Linux machine as the API. Install Google Chrome,
+FFmpeg, and PulseAudio or PipeWire with Pulse compatibility (`pactl`). Create
+a dedicated virtual output; the bot refuses to start if its sink or monitor
+is missing and never records the default system output:
+
+```bash
+pactl load-module module-null-sink sink_name=meet_bot sink_properties=device.description=Meeting_AI_Bot
+pactl list short sinks   # must include meet_bot
+pactl list short sources # must include meet_bot.monitor
+```
+
+Set `BOT_AUDIO_SINK=meet_bot` and `BOT_CHROME_PATH` to the installed Chrome
+executable in `.env`. Set `MEETING_DATA_DIR` to an absolute private path if
+running the processes from different directories. The optional
+`BOT_ADMISSION_TIMEOUT_SECONDS` defaults to 300. Open Chrome once with
+`--user-data-dir=/absolute/path/to/meeting-data/bot-profile`, sign in to a
+dedicated bot Google account, then close that Chrome window before starting
+the runner. The app does not ask for or store the account password. The
+profile, database, temporary files, and recordings live under
+`MEETING_DATA_DIR`; the default `meeting-data/` path is Git ignored. Keep a
+custom data directory outside the repository or add it to your local ignore
+rules.
+
+Run the API, bot runner, and inference worker in separate terminals:
+
+```bash
+PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-access-log
+PYTHONPATH=apps/api uv run --env-file .env python -m app.services.meetings.bot_runner
+PYTHONPATH=apps/api uv run --env-file .env python -m app.services.meetings.worker
+```
+
+In the web app, paste a standard `https://meet.google.com/xxx-xxxx-xxx`
+link. Inform participants that the bot records audio; Google Meet's own
+recording indicator is not used. A host may need to admit **Meeting AI
+Recorder**. The bot records only after admission, writes private mono 16 kHz
+WAV parts, and rolls over before 30 minutes per part. A 30-minute part is
+about 55 MiB, so check disk space for long meetings. Stopping the bot or a
+normal meeting end queues one meeting for the existing AI worker. A browser
+or capture failure reports `interrupted`; use **Xử lý phần đã ghi** to queue
+the closed parts or **Xóa bản ghi** to discard them. The bot does not rejoin
+automatically. Deleting the resulting meeting removes its audio and derived
+results. Files remain until processed/discarded or the meeting is deleted.
+
+Bot controls are local-only: `POST /api/bot-sessions`, `GET
+/api/bot-sessions/active`, `GET /api/bot-sessions/recent`, `GET
+/api/bot-sessions/{id}`, `POST /api/bot-sessions/{id}/stop`, `POST
+/api/bot-sessions/{id}/process-parts`, and `DELETE /api/bot-sessions/{id}`.
+Create accepts JSON `{"url":"https://meet.google.com/abc-defg-hij",
+"title":"Planning"}` and an optional `Idempotency-Key`. Session responses
+omit the URL. Meeting list/detail responses add `source`; detail audio parts
+add `start_seconds` so gaps remain visible in the timeline. Upload limits
+and `/api/audio/process` are unchanged.
+
+Starting the API or runner adds SQLite tables and columns automatically.
+For backup, stop all three processes and copy the entire data directory.
+Before rollback, stop them, preserve or export that directory, and do not
+run an older worker on queued bot meetings: it does not understand recordings
+over 30 minutes. Test a short consented Meet, host admission, sink isolation,
+rollover, stop, interruption, and deletion on the target machine before using
+the bot for real meetings; browser controls depend on the installed Chrome
+and current Meet interface.
 
 ## PhoWhisper fine-tuning
 
