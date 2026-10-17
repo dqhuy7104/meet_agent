@@ -126,6 +126,31 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 start_seconds REAL,
                 PRIMARY KEY (meeting_id, ordinal)
             );
+            CREATE TABLE IF NOT EXISTS bot_sessions (
+                id TEXT PRIMARY KEY,
+                url TEXT,
+                url_hash TEXT NOT NULL,
+                title TEXT,
+                idempotency_key TEXT UNIQUE,
+                status TEXT NOT NULL CHECK(status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing', 'completed', 'interrupted', 'cancelled')),
+                failure_code TEXT,
+                created_at TEXT NOT NULL,
+                started_at TEXT,
+                ended_at TEXT,
+                stop_requested INTEGER NOT NULL DEFAULT 0,
+                meeting_id TEXT REFERENCES meetings(id),
+                capture_incomplete INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS bot_session_parts (
+                session_id TEXT NOT NULL REFERENCES bot_sessions(id) ON DELETE CASCADE,
+                ordinal INTEGER NOT NULL,
+                storage_key TEXT NOT NULL UNIQUE,
+                start_seconds REAL NOT NULL,
+                duration_seconds REAL NOT NULL,
+                PRIMARY KEY (session_id, ordinal)
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS one_active_bot_session ON bot_sessions((1))
+                WHERE status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing');
             CREATE VIRTUAL TABLE IF NOT EXISTS transcript_fts USING fts5(
                 meeting_id UNINDEXED, segment_id UNINDEXED, text, tokenize='unicode61'
             );

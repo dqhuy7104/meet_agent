@@ -50,6 +50,18 @@ def publish_audio(data_dir: Path, data: bytes) -> str:
     return storage_key
 
 
+def publish_audio_file(data_dir: Path, temporary_path: Path) -> str:
+    """Move a closed recorder file into private storage with an opaque key."""
+    if temporary_path.parent.resolve() != (data_dir / "tmp").resolve() or not temporary_path.is_file():
+        raise ValueError("Recorder file must be inside the private temporary directory")
+    storage_key = uuid.uuid4().hex
+    temporary_path.chmod(0o600)
+    with temporary_path.open("rb") as source:
+        os.fsync(source.fileno())
+    os.replace(temporary_path, audio_path(data_dir, storage_key))
+    return storage_key
+
+
 def cleanup_orphaned_audio(data_dir: Path) -> None:
     """Remove files from interrupted uploads, retaining referenced audio."""
     with audio_publication_lock(data_dir):
@@ -59,6 +71,7 @@ def cleanup_orphaned_audio(data_dir: Path) -> None:
         connection = sqlite3.connect(data_dir / "meetings.sqlite3")
         try:
             referenced = {row[0] for row in connection.execute("SELECT storage_key FROM meeting_audio_files")}
+            referenced.update(row[0] for row in connection.execute("SELECT storage_key FROM bot_session_parts"))
         finally:
             connection.close()
         for audio in (data_dir / "audio").iterdir():
