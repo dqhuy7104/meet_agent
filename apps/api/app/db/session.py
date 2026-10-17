@@ -66,7 +66,7 @@ def open_meeting_db(data_dir: Path) -> sqlite3.Connection:
 
 def initialize_meeting_store(data_dir: Path) -> None:
     """Create private storage directories and the SQLite schema."""
-    for directory in (data_dir, data_dir / "audio", data_dir / "tmp"):
+    for directory in (data_dir, data_dir / "audio", data_dir / "tmp", data_dir / "bot-tmp"):
         directory.mkdir(parents=True, exist_ok=True, mode=0o700)
         directory.chmod(0o700)
     connection = open_meeting_db(data_dir)

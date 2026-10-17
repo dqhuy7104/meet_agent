@@ -52,7 +52,7 @@ def publish_audio(data_dir: Path, data: bytes) -> str:
 
 def publish_audio_file(data_dir: Path, temporary_path: Path) -> str:
     """Move a closed recorder file into private storage with an opaque key."""
-    if temporary_path.parent.resolve() != (data_dir / "tmp").resolve() or not temporary_path.is_file():
+    if temporary_path.parent.resolve() not in {(data_dir / "tmp").resolve(), (data_dir / "bot-tmp").resolve()} or not temporary_path.is_file():
         raise ValueError("Recorder file must be inside the private temporary directory")
     storage_key = uuid.uuid4().hex
     temporary_path.chmod(0o600)

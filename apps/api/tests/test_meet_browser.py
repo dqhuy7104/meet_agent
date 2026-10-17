@@ -57,6 +57,8 @@ class FakePage:
             labels.append("Turn on camera")
         if self.admitted and self.joined:
             labels.append("Leave call")
+        if self.joined and not self.admitted:
+            labels.append("You left the meeting")
         return labels
 
     def get_by_role(self, role: str, name: re.Pattern[str]) -> FakeLocator:
@@ -146,3 +148,9 @@ class MeetBrowserTest(unittest.IsolatedAsyncioTestCase):
         await self.browser.close()
         self.assertTrue(self.fake.context.closed)
         self.assertTrue(self.fake.stopped)
+
+    async def test_unexpected_browser_close_is_interruption(self) -> None:
+        await self.browser.start("https://meet.google.com/abc-defg-hij")
+        self.fake.context.page.closed = True
+        with self.assertRaises(JoinFailed):
+            await self.browser.wait_for_end()

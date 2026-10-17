@@ -23,6 +23,7 @@ _CAM_ON = re.compile(r"turn off camera|tắt máy ảnh|tắt camera", re.I)
 _CAM_OFF = re.compile(r"turn on camera|bật máy ảnh|bật camera", re.I)
 _JOIN = re.compile(r"join now|ask to join|tham gia ngay|yêu cầu tham gia", re.I)
 _LEAVE = re.compile(r"leave call|leave meeting|rời khỏi cuộc gọi|rời cuộc họp", re.I)
+_ENDED = re.compile(r"you left the meeting|meeting has ended|bạn đã rời khỏi cuộc họp|cuộc họp đã kết thúc", re.I)
 _NAME = re.compile(r"your name|tên của bạn", re.I)
 
 
@@ -101,9 +102,18 @@ class ChromeMeetBrowser:
     async def wait_for_end(self) -> None:
         if self._page is None:
             return
-        while not self._page.is_closed():
-            if not await self._page.get_by_role("button", name=_LEAVE).is_visible():
+        missing_control_since: float | None = None
+        while True:
+            if self._page.is_closed():
+                raise JoinFailed("browser_closed")
+            if await self._page.get_by_role("heading", name=_ENDED).is_visible():
                 return
+            if await self._page.get_by_role("button", name=_LEAVE).is_visible():
+                missing_control_since = None
+            elif missing_control_since is None:
+                missing_control_since = time.monotonic()
+            elif time.monotonic() - missing_control_since > 10:
+                raise JoinFailed("meeting_state_lost")
             await asyncio.sleep(self._poll_seconds)
 
     async def close(self) -> None:
