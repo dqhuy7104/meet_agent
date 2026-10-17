@@ -2,7 +2,7 @@ import type { ApiMeeting, MeetingStatus } from "../types/meeting";
 
 export type MeetingListResponse = { items: ApiMeeting[]; total: number; limit: number; offset: number };
 export type BackendSegment = { start: number; end: number; speaker: string; text: string };
-export type BackendMeeting = ApiMeeting & { failure_code: string | null; transcript: string | null; vad_segments: {start:number;end:number}[]; diarization_segments: {start:number;end:number;speaker:string}[]; transcript_segments: BackendSegment[]; audio_files: { ordinal: number; original_filename: string; duration_seconds: number | null }[] };
+export type BackendMeeting = ApiMeeting & { failure_code: string | null; transcript: string | null; vad_segments: {start:number;end:number}[]; diarization_segments: {start:number;end:number;speaker:string}[]; transcript_segments: BackendSegment[]; audio_files: { ordinal: number; original_filename: string; duration_seconds: number | null; start_seconds: number | null }[] };
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
 async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, options);

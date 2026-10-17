@@ -31,6 +31,8 @@ import {
   X,
 } from "lucide-react";
 import { ApiError, meetingApi, type BackendMeeting } from "./lib/api";
+import { MeetBotPanel } from "./components/MeetBotPanel";
+import { findAudioPartAtTime } from "./lib/timeline";
 import type { ApiMeeting, MeetingStatus } from "./types/meeting";
 
 const labels: Record<MeetingStatus, string> = {
@@ -444,13 +446,14 @@ function Meetings() {
       <section className="title">
         <div>
           <small>THƯ VIỆN</small>
-          <h2>Cuộc họp của bạn</h2>ok
+          <h2>Cuộc họp của bạn</h2>
         </div>
         <button className="primary" onClick={() => setOpen(true)}>
           <Plus />
           Cuộc họp mới
         </button>
       </section>
+      <MeetBotPanel />
       <div className="toolbar">
         <label>
           <Search size={18} />
@@ -559,19 +562,20 @@ function LocalWorkspace({ id }: { id: string }) {
     };
   }, [load]);
   const seek = (seconds: number) => {
-    let offset = 0;
     const parts = meeting?.audio_files ?? [];
-    for (const part of parts) {
-      const partDuration = part.duration_seconds ?? 0;
-      if (seconds < offset + partDuration || part.ordinal === parts.length - 1) {
-        const player = audios.current[part.ordinal];
-        if (player) {
-          player.currentTime = Math.max(0, seconds - offset);
-          void player.play().catch(() => undefined);
-        }
-        return;
-      }
-      offset += partDuration;
+    let uploadOffset = 0;
+    const timing = parts.map((part) => {
+      const start_seconds = part.start_seconds ?? uploadOffset;
+      const duration_seconds = part.duration_seconds ?? 0;
+      uploadOffset += duration_seconds;
+      return { start_seconds, duration_seconds };
+    });
+    const index = findAudioPartAtTime(timing, seconds);
+    if (index === null) return;
+    const player = audios.current[parts[index].ordinal];
+    if (player) {
+      player.currentTime = seconds - timing[index].start_seconds;
+      void player.play().catch(() => undefined);
     }
   };
   const remove = async () => {
@@ -654,7 +658,7 @@ function LocalWorkspace({ id }: { id: string }) {
               </div>
               {meeting.audio_files.map((part) => (
                 <div key={part.ordinal}>
-                  {meeting.audio_files.length > 1 && <p>{part.ordinal + 1}. {part.original_filename}</p>}
+                  {meeting.audio_files.length > 1 && <p>{part.ordinal + 1}. {part.original_filename} · từ {time(part.start_seconds ?? 0)}</p>}
                   <audio
                     ref={(node) => { audios.current[part.ordinal] = node; }}
                     controls

@@ -68,6 +68,13 @@ class BotSessionRepository:
         ).fetchone()
         return _session(row) if row else None
 
+    def get_recent_interrupted(self) -> BotSession | None:
+        row = self.connection.execute(
+            """SELECT * FROM bot_sessions WHERE status='interrupted'
+               ORDER BY ended_at DESC, created_at DESC LIMIT 1"""
+        ).fetchone()
+        return _session(row) if row else None
+
     def parts(self, session_id: str) -> list[BotPart]:
         rows = self.connection.execute(
             "SELECT * FROM bot_session_parts WHERE session_id=? ORDER BY ordinal", (session_id,)

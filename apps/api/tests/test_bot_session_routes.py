@@ -101,3 +101,12 @@ class BotSessionRouteTest(unittest.IsolatedAsyncioTestCase):
             "url": "https://meet.google.com/abc-defg-hij"
         }, headers={"Origin": "https://evil.example"})
         self.assertEqual(response.status_code, 403)
+
+    async def test_recent_recovers_interrupted_session_after_page_reload(self) -> None:
+        created = await self.client.post("/api/bot-sessions", json={"url": "https://meet.google.com/abc-defg-hij"})
+        session_id = created.json()["id"]
+        self.repository.claim_next()
+        self.repository.set_status(session_id, "interrupted", "runner_interrupted")
+        response = await self.client.get("/api/bot-sessions/recent")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["id"], session_id)

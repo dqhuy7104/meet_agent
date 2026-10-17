@@ -89,6 +89,14 @@ async def get_active_bot_session(
     return _response(repository, session) if session else Response(status_code=204)
 
 
+@router.get("/recent", response_model=BotSessionResponse | None)
+async def get_recent_interrupted_bot_session(
+    repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
+) -> BotSessionResponse | Response:
+    session = repository.get_recent_interrupted()
+    return _response(repository, session) if session else Response(status_code=204)
+
+
 @router.get("/{session_id}", response_model=BotSessionResponse)
 async def get_bot_session(
     session_id: str, repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
