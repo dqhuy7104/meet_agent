@@ -15,4 +15,6 @@ dependencies = [
   "transformers",
   "uvicorn",
   "playwright>=1.64.0",
+  "httpx>=0.28.1",
+  "psycopg[binary]>=3.3.6",
 ]
