@@ -21,12 +21,12 @@ class ModelClient:
         self.registry = registry
         self.http = http
 
-    async def _post(self, provider, path: str, payload: dict) -> dict:
+    async def _request(self, provider, path: str, payload: dict | None = None) -> dict:
         headers = {}
         if provider.api_key.get_secret_value():
             headers['Authorization'] = 'Bearer ' + provider.api_key.get_secret_value()
         try:
-            async with self.http.stream('POST', provider.base_url.rstrip('/') + path, json=payload,
+            async with self.http.stream('POST' if payload is not None else 'GET', provider.base_url.rstrip('/') + path, json=payload,
                                         headers=headers, timeout=provider.timeout_seconds, follow_redirects=False) as response:
                 response.raise_for_status()
                 body = bytearray()
@@ -47,7 +47,9 @@ class ModelClient:
             return []
         provider = self.registry.provider(profile.provider_id)
         is_ollama = provider.kind == 'ollama'
-        data = await self._post(provider, '/api/embed' if is_ollama else '/embeddings',
+        if is_ollama:
+            await self._check_digest(provider, profile)
+        data = await self._request(provider, '/api/embed' if is_ollama else '/embeddings',
                                 {'model': profile.model, 'input': texts, **({'truncate': False} if is_ollama else {})})
         try:
             if is_ollama:
@@ -58,9 +60,22 @@ class ModelClient:
                     raise ValueError()
                 vectors = [row['embedding'] for row in rows]
             validate_vectors(vectors, len(texts), profile.dimensions)
+            if is_ollama:
+                await self._check_digest(provider, profile)
+            elif data.get('model', profile.model) != profile.model:
+                raise RagError('embedding_revision_changed', 409)
             return vectors
         except (KeyError, TypeError, ValueError):
             raise RagError('invalid_provider_response') from None
+
+    async def _check_digest(self, provider, profile: EmbeddingProfile) -> None:
+        data = await self._request(provider, '/api/tags')
+        try:
+            model = next(m for m in data['models'] if m['name'] == profile.model)
+            if model['digest'].removeprefix('sha256:') != profile.revision.removeprefix('sha256:'):
+                raise RagError('embedding_revision_changed', 409)
+        except (KeyError, TypeError, StopIteration):
+            raise RagError('embedding_revision_changed', 409) from None
 
     async def generate(self, selection: ChatSelection, messages: list[dict[str, str]]) -> str:
         is_ollama = selection.provider.kind == 'ollama'
@@ -69,7 +84,7 @@ class ModelClient:
             payload.update(format='json', options={'num_predict': selection.model.output_tokens, 'num_ctx': selection.model.context_tokens})
         else:
             payload.update(max_tokens=selection.model.output_tokens, response_format={'type': 'json_object'})
-        data = await self._post(selection.provider, '/api/chat' if is_ollama else '/chat/completions', payload)
+        data = await self._request(selection.provider, '/api/chat' if is_ollama else '/chat/completions', payload)
         try:
             result = data['message']['content'] if is_ollama else data['choices'][0]['message']['content']
             if type(result) is not str:

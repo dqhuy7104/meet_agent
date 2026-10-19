@@ -10,9 +10,9 @@ def environment(kind='openai_compatible'):
             'KEY': 'private-token', 'RAG_PROVIDERS_JSON': json.dumps([{
                 'id': 'local', 'name': 'Local', 'kind': kind, 'base_url': 'http://127.0.0.1:11434',
                 'api_key_env': 'KEY', 'chat_models': [{'id': 'chat', 'context_tokens': 4096, 'output_tokens': 512}],
-                'embedding_models': ['embed@sha256:abc']}]),
+                'embedding_models': ['embed:fixed']}]),
             'RAG_EMBEDDING_PROFILES_JSON': json.dumps([{'id': 'p', 'provider_id': 'local',
-                'model': 'embed@sha256:abc', 'revision': 'sha256:abc', 'dimensions': 2}])}
+                'model': 'embed:fixed', 'revision': 'sha256:' + 'a'*64, 'dimensions': 2}])}
 
 
 class ConfigTest(unittest.TestCase):

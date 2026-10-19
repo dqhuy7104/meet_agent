@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import ipaddress
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Literal, Mapping
 from urllib.parse import urlsplit
@@ -113,7 +114,7 @@ def load_rag_settings(environment: Mapping[str, str]) -> RagSettings:
             provider = by_id[profile.provider_id]
             if profile.model not in provider.embedding_models:
                 raise ValueError()
-            if provider.kind == 'ollama' and not profile.model.endswith('@' + profile.revision):
+            if provider.kind == 'ollama' and not re.fullmatch(r'sha256:[0-9a-f]{64}', profile.revision):
                 raise ValueError()
         max_k = int(environment.get('RAG_MAX_K', '10'))
         minimum = float(environment.get('RAG_MIN_COSINE_SIMILARITY', '.35'))

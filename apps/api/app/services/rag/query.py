@@ -1,0 +1,60 @@
+"""Query orchestration with independent SQLite eligibility checks."""
+from app.core.rag_config import RagError, RagSettings, ProviderRegistry
+from app.schemas.chat import RagQuery, SelectedMeeting
+from app.services.rag.answering import generate_answer, insufficient
+from app.services.rag.chunking import estimate_tokens, snapshot_meeting
+from app.services.rag.prompt import build_messages
+from app.services.rag.ranking import rank_candidates, select_context
+
+
+class QueryService:
+    def __init__(self, settings: RagSettings, registry: ProviderRegistry, meetings, rag, client) -> None:
+        self.settings, self.registry, self.meetings, self.rag, self.client = settings, registry, meetings, rag, client
+
+    def eligible(self, chunk) -> bool:
+        detail = self.meetings.get_detail(chunk.meeting_id)
+        return bool(detail and detail.meeting.status == 'completed' and snapshot_meeting(detail).revision == chunk.revision)
+
+    async def ready(self, profile_id: str) -> bool:
+        if not await self.rag.call('is_profile_ready', profile_id):
+            return False
+        rows = self.meetings.connection.execute("SELECT id FROM meetings WHERE status='completed'").fetchall()
+        for row in rows:
+            detail = self.meetings.get_detail(row[0])
+            if detail and detail.meeting.status == 'completed':
+                snapshot = snapshot_meeting(detail)
+                if await self.rag.call('manifest', profile_id, row[0]) != snapshot.revision:
+                    return False
+        return True
+
+    async def catalog(self):
+        ready = [p.id for p in self.settings.profiles if await self.ready(p.id)]
+        return self.registry.catalog(ready)
+
+    async def query(self, request: RagQuery):
+        selection = self.registry.resolve_chat(request.chat_provider_id, request.chat_model_id)
+        profile = self.registry.resolve_profile(request.embedding_profile_id)
+        if request.k > self.settings.max_k:
+            raise RagError('invalid_k', 422)
+        if not await self.ready(profile.id):
+            raise RagError('profile_not_ready', 409)
+        if request.meeting_ids == []:
+            return insufficient(self.settings.prompt_version)
+        vector = (await self.client.embed(profile, [request.question]))[0]
+        vectors, texts = await self.rag.call('search', profile.id, request.question, vector, request.meeting_ids)
+        ranked = rank_candidates(request.question, [c for c in vectors if self.eligible(c.chunk)],
+                                 [c for c in texts if self.eligible(c.chunk)], self.settings.min_cosine_similarity)
+        overhead = sum(estimate_tokens(m['content']) + 16 for m in build_messages(request.question, [], self.settings.prompt_version))
+        budget = selection.model.context_tokens - selection.model.output_tokens - overhead - 256
+        sources = select_context(ranked, request.k, max(0, budget))
+        # Recheck after all awaited retrieval work and immediately before dispatch.
+        sources = [s for s in sources if self.eligible(s)]
+        answer = await generate_answer(request.question, sources, selection, self.client, self.settings.prompt_version)
+        if any(not self.eligible(s) for s in sources):
+            return insufficient(self.settings.prompt_version)
+        selected = {}
+        for source in sources:
+            score = next(c.relevance_score for c in ranked if c.chunk.source_id == source.source_id)
+            if source.meeting_id not in selected:
+                selected[source.meeting_id] = SelectedMeeting(meeting_id=source.meeting_id, title=source.meeting_title, relevance_score=score)
+        return answer.model_copy(update={'selected_meetings': list(selected.values())})

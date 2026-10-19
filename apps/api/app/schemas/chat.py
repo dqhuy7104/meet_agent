@@ -15,7 +15,7 @@ class RagQuery(StrictModel):
     @field_validator('question', mode='before')
     @classmethod
     def clean_question(cls, value: str) -> str:
-        if '\0' in value:
+        if type(value) is not str or '\0' in value:
             raise ValueError('invalid_question')
         return value.strip()
 

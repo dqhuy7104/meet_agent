@@ -12,7 +12,9 @@ class ProviderTest(unittest.IsolatedAsyncioTestCase):
             registry = ProviderRegistry(load_rag_settings(environment(kind)))
             requests = []
             def respond(request):
-                body = json.loads(request.content)
+                body = json.loads(request.content) if request.content else {}
+                if request.url.path == '/api/tags':
+                    return httpx.Response(200, json={'models': [{'name': 'embed:fixed', 'digest': 'a'*64}]})
                 requests.append((request.url.path, body))
                 if 'embed' in request.url.path:
                     return httpx.Response(200, json={'embeddings': [[1., 0.]], 'data': [{'index': 0, 'embedding': [1., 0.]}]})
@@ -38,3 +40,17 @@ class ProviderTest(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(fail)) as http:
             with self.assertRaisesRegex(RagError, '^provider_timeout$'):
                 await ModelClient(registry, http).embed(registry.resolve_profile('p'), ['private'])
+
+    async def test_ollama_digest_change_is_rejected_before_embedding(self):
+        env = environment('ollama')
+        providers=json.loads(env['RAG_PROVIDERS_JSON']); providers[0]['embedding_models']=['embed:fixed']
+        profiles=json.loads(env['RAG_EMBEDDING_PROFILES_JSON']); profiles[0].update(model='embed:fixed',revision='sha256:'+'a'*64)
+        env.update(RAG_PROVIDERS_JSON=json.dumps(providers),RAG_EMBEDDING_PROFILES_JSON=json.dumps(profiles))
+        registry=ProviderRegistry(load_rag_settings(env))
+        def respond(request):
+            if request.url.path=='/api/tags':
+                return httpx.Response(200,json={'models':[{'name':'embed:fixed','digest':'b'*64}]})
+            self.fail('must not embed changed model')
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            with self.assertRaisesRegex(RagError,'embedding_revision_changed'):
+                await ModelClient(registry,http).embed(registry.resolve_profile('p'),['hello'])
