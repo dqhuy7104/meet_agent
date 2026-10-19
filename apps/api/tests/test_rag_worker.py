@@ -70,3 +70,46 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
         from dataclasses import replace
         await synchronize_once(self.meetings, self.repository, self.client, replace(self.settings, profiles=()))
         self.assertEqual(self.connection.execute('SELECT count(*) FROM rag_chunks').fetchone()[0], 0)
+
+    async def test_batches_fit_bounded_provider_responses(self):
+        from app.schemas.transcript import AudioProcessResponse,TranscriptSegment
+        from app.core.rag_config import RagError
+        from dataclasses import replace
+        profile=self.settings.profiles[0].model_copy(update={'dimensions':768})
+        settings=replace(self.settings,profiles=(profile,))
+        self.meetings.create_meeting('long','Long','m.wav','key','hash',None)
+        self.meetings.claim_next()
+        self.meetings.complete('long',AudioProcessResponse(filename='m.wav',duration_seconds=60,sample_rate=16000,transcript='text',vad_segments=[],diarization_segments=[],transcript_segments=[TranscriptSegment(start=i,end=i+1,speaker='A',text='word '*180) for i in range(30)]))
+        batches=[]
+        async def embed(profile,texts):
+            import json
+            vectors=[[0.12345678901234567]*768 for _ in texts]
+            if len(json.dumps({'data':[{'index':i,'embedding':v} for i,v in enumerate(vectors)]}).encode())>131072:
+                raise RagError('invalid_provider_response')
+            batches.append(len(texts));return vectors
+        self.client.embed=embed
+        await synchronize_once(self.meetings,self.repository,self.client,settings)
+        self.assertIsNotNone(self.repository.manifest('p','long'))
+        self.assertTrue(batches)
+
+    async def test_worker_reconnects_after_startup_and_runtime_outage(self):
+        import argparse
+        import psycopg
+        from app.services.rag.worker import _run
+        from app.core.config import Settings
+        class Finished(Exception):pass
+        calls=[]
+        def connect(settings):
+            calls.append('connect')
+            if len(calls)==1:raise psycopg.OperationalError('startup outage')
+            return psycopg.connect(os.environ['RAG_TEST_DATABASE_URL'],autocommit=True,options='-c search_path='+self.schema+',public')
+        synchronization=[]
+        async def synchronize(*args):
+            synchronization.append(1)
+            if len(synchronization)==1:raise psycopg.OperationalError('runtime restart')
+            raise Finished()
+        async def pause(*args):pass
+        args=argparse.Namespace(once=False,migrate=False,backfill=False)
+        with patch('app.services.rag.worker.load_rag_settings',return_value=self.settings),patch('app.services.rag.worker.get_settings',return_value=Settings(meeting_data_dir=Path(self.temp.name))),patch('app.services.rag.worker.open_rag_db',side_effect=connect),patch('app.services.rag.worker.synchronize_once',side_effect=synchronize),patch('app.services.rag.worker.asyncio.sleep',side_effect=pause):
+            with self.assertRaises(Finished):await _run(args)
+        self.assertGreaterEqual(len(calls),3)

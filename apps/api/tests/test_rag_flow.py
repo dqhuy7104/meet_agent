@@ -39,3 +39,20 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(c.meeting_id != deleted for c in answer.citations))
         empty=await service.query(request.model_copy(update={'meeting_ids':[]}))
         self.assertEqual(empty.retrieval_status, 'insufficient_evidence')
+
+    async def test_same_id_new_model_cannot_query_old_vectors(self):
+        from dataclasses import replace
+        from app.core.rag_config import RagError
+        complete_meeting(self.meetings,'a')
+        await synchronize_once(self.meetings,self.repository,self.client,self.settings)
+        changed=self.settings.profiles[0].model_copy(update={'model':'changed','revision':'v2'})
+        settings=replace(self.settings,profiles=(changed,))
+        class Database:
+            async def call(inner,method,*args):return getattr(self.repository,method)(*args)
+        async def generate(*args):return '{"status":"insufficient","claims":[]}'
+        self.client.generate=generate
+        service=QueryService(settings,ProviderRegistry(settings),self.meetings,Database(),self.client)
+        request=RagQuery(question='kế hoạch',k=1,chat_provider_id='local',chat_model_id='chat',embedding_profile_id='p')
+        with self.assertRaisesRegex(RagError,'immutable_profile_changed'):
+            await service.query(request)
+        self.assertEqual((await service.catalog()).embedding_profiles,[])

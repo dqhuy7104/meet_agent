@@ -16,6 +16,7 @@ class QueryService:
         return bool(detail and detail.meeting.status == 'completed' and snapshot_meeting(detail).revision == chunk.revision)
 
     async def ready(self, profile_id: str) -> bool:
+        await self.rag.call('validate_profile', self.registry.resolve_profile(profile_id))
         if not await self.rag.call('is_profile_ready', profile_id):
             return False
         rows = self.meetings.connection.execute("SELECT id FROM meetings WHERE status='completed'").fetchall()
@@ -28,8 +29,32 @@ class QueryService:
         return True
 
     async def catalog(self):
-        ready = [p.id for p in self.settings.profiles if await self.ready(p.id)]
+        ready = []
+        for profile in self.settings.profiles:
+            try:
+                if await self.ready(profile.id):
+                    ready.append(profile.id)
+            except RagError as error:
+                if error.code not in {'profile_not_ready', 'immutable_profile_changed'}:
+                    raise
         return self.registry.catalog(ready)
+
+    async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str) -> dict:
+        from app.services.rag.prompt import PROMPT_HASH
+        profile = self.registry.resolve_profile(profile_id)
+        selection = self.registry.resolve_chat(provider_id, model_id)
+        if not await self.ready(profile_id):
+            raise RagError('profile_not_ready', 409)
+        revisions = {}
+        for row in self.meetings.connection.execute("SELECT id FROM meetings WHERE status='completed'"):
+            detail = self.meetings.get_detail(row[0])
+            if detail and detail.meeting.status == 'completed':
+                revisions[row[0]] = snapshot_meeting(detail).revision
+        return dict(meeting_revisions=revisions, embedding_profile=profile.model_dump(),
+                    prompt_version=self.settings.prompt_version, prompt_hash=PROMPT_HASH,
+                    chat_provider_id=provider_id, chat_model=selection.model.model_dump(),
+                    min_cosine_similarity=self.settings.min_cosine_similarity,
+                    provider_versions='unavailable', device='unavailable')
 
     async def query(self, request: RagQuery):
         selection = self.registry.resolve_chat(request.chat_provider_id, request.chat_model_id)

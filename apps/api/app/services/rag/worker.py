@@ -56,8 +56,9 @@ async def synchronize_once(sqlite: MeetingRepository, rag: RagRepository, client
             try:
                 chunks = chunk_transcript(snapshot)
                 vectors = []
-                for offset in range(0, len(chunks), 16):
-                    vectors.extend(await clients.embed(profile, [c.text for c in chunks[offset:offset+16]]))
+                batch_size = max(1, min(16, 65536 // (profile.dimensions * 32)))
+                for offset in range(0, len(chunks), batch_size):
+                    vectors.extend(await clients.embed(profile, [c.text for c in chunks[offset:offset+batch_size]]))
                 current = _snapshot(sqlite, meeting_id)
                 if current is None or current.revision != revision:
                     rag.purge(meeting_id)
@@ -89,26 +90,31 @@ async def _run(args) -> None:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
             raise RagError('worker_already_running') from None
-        with open_meeting_db(data_dir) as sqlite, open_rag_db(settings) as connection:
-            if args.migrate:
-                migrate_rag_db(connection)
-            rag = RagRepository(connection)
-            rag.register_profiles(list(settings.profiles))
-            if args.backfill:
-                connection.execute("UPDATE rag_index_jobs SET state='pending',attempts=0,next_attempt_at=now(),lease_until=NULL WHERE state='failed'")
-            async with httpx.AsyncClient() as http:
-                while True:
-                    try:
-                        worked = await synchronize_once(MeetingRepository(sqlite), rag, ModelClient(ProviderRegistry(settings), http), settings)
-                    except (psycopg.Error, RagError):
-                        # Never log database/provider exception strings or private payloads.
-                        if args.once:
-                            raise RagError('synchronization_unavailable') from None
-                        worked = False
+        has_migrated = False
+        has_reset_jobs = False
+        with open_meeting_db(data_dir) as sqlite:
+            while True:
+                try:
+                    # A fresh connection also recovers server restarts and broken sockets.
+                    with open_rag_db(settings) as connection:
+                        if args.migrate and not has_migrated:
+                            migrate_rag_db(connection)
+                            has_migrated = True
+                        rag = RagRepository(connection)
+                        rag.register_profiles(list(settings.profiles))
+                        if args.backfill and not has_reset_jobs:
+                            connection.execute("UPDATE rag_index_jobs SET state='pending',attempts=0,next_attempt_at=now(),lease_until=NULL WHERE state='failed'")
+                            has_reset_jobs = True
+                        async with httpx.AsyncClient() as http:
+                            worked = await synchronize_once(MeetingRepository(sqlite), rag, ModelClient(ProviderRegistry(settings), http), settings)
+                except (psycopg.Error, RagError):
                     if args.once:
-                        break
-                    if not worked:
-                        await asyncio.sleep(1)
+                        raise RagError('synchronization_unavailable') from None
+                    worked = False
+                if args.once:
+                    break
+                if not worked:
+                    await asyncio.sleep(1)
 
 
 def main() -> None:

@@ -54,3 +54,16 @@ class ProviderTest(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
             with self.assertRaisesRegex(RagError,'embedding_revision_changed'):
                 await ModelClient(registry,http).embed(registry.resolve_profile('p'),['hello'])
+
+    async def test_digest_change_during_embedding_preserves_safe_code(self):
+        registry=ProviderRegistry(load_rag_settings(environment('ollama')))
+        tag_calls=0
+        def respond(request):
+            nonlocal tag_calls
+            if request.url.path=='/api/tags':
+                tag_calls+=1
+                return httpx.Response(200,json={'models':[{'name':'embed:fixed','digest':('a' if tag_calls==1 else 'b')*64}]})
+            return httpx.Response(200,json={'embeddings':[[1.,0.]]})
+        async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
+            with self.assertRaisesRegex(RagError,'embedding_revision_changed'):
+                await ModelClient(registry,http).embed(registry.resolve_profile('p'),['hello'])

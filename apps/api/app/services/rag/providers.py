@@ -1,6 +1,7 @@
 """Bounded, non-redirecting provider HTTP adapters with safe errors."""
 import json
 import math
+from typing import Callable
 import httpx
 from app.core.rag_config import ChatSelection, EmbeddingProfile, ProviderRegistry, RagError
 
@@ -17,20 +18,24 @@ def validate_vectors(vectors: list[list[float]], count: int, dimensions: int) ->
 
 
 class ModelClient:
-    def __init__(self, registry: ProviderRegistry, http: httpx.AsyncClient) -> None:
+    def __init__(self, registry: ProviderRegistry, http: httpx.AsyncClient, remaining: Callable[[], float] | None = None) -> None:
         self.registry = registry
         self.http = http
+        self.remaining = remaining
 
     async def _request(self, provider, path: str, payload: dict | None = None) -> dict:
+        timeout = min(provider.timeout_seconds, self.remaining()) if self.remaining else provider.timeout_seconds
         headers = {}
         if provider.api_key.get_secret_value():
             headers['Authorization'] = 'Bearer ' + provider.api_key.get_secret_value()
         try:
             async with self.http.stream('POST' if payload is not None else 'GET', provider.base_url.rstrip('/') + path, json=payload,
-                                        headers=headers, timeout=provider.timeout_seconds, follow_redirects=False) as response:
+                                        headers=headers, timeout=timeout, follow_redirects=False) as response:
                 response.raise_for_status()
                 body = bytearray()
                 async for part in response.aiter_bytes():
+                    if self.remaining:
+                        self.remaining()
                     body.extend(part)
                     if len(body) > 131072:
                         raise RagError('invalid_provider_response')
@@ -39,6 +44,8 @@ class ModelClient:
             raise RagError('provider_timeout', 504) from None
         except httpx.HTTPError:
             raise RagError('provider_unavailable') from None
+        except RagError:
+            raise
         except (ValueError, TypeError):
             raise RagError('invalid_provider_response') from None
 
@@ -65,6 +72,8 @@ class ModelClient:
             elif data.get('model', profile.model) != profile.model:
                 raise RagError('embedding_revision_changed', 409)
             return vectors
+        except RagError:
+            raise
         except (KeyError, TypeError, ValueError):
             raise RagError('invalid_provider_response') from None
 

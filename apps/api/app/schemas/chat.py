@@ -1,7 +1,7 @@
 """Public meeting question-answering contracts."""
 from typing import Annotated, Literal
 from pydantic import Field, StrictInt, field_validator
-from app.core.rag_config import StrictModel
+from app.core.rag_config import StrictModel, EmbeddingProfile, ChatModel
 
 
 class RagQuery(StrictModel):
@@ -67,3 +67,15 @@ class ProviderCatalog(StrictModel):
     max_k: int
     providers: list[ProviderChoice]
     embedding_profiles: list[ProfileChoice]
+
+
+class EvaluationState(StrictModel):
+    meeting_revisions: dict[str, str]
+    embedding_profile: EmbeddingProfile
+    prompt_version: str
+    prompt_hash: str
+    chat_provider_id: str
+    chat_model: ChatModel
+    min_cosine_similarity: float
+    provider_versions: str
+    device: str

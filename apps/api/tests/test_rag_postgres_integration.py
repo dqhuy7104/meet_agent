@@ -76,3 +76,23 @@ class PostgresTest(unittest.TestCase):
         other = self.profile.model_copy(update={'id': 'other', 'dimensions': 3})
         self.repository.register_profiles([other])
         self.assertEqual(self.repository.search('other', 'Việt', [1., 0., 0.], None), ([], []))
+
+    def test_sql_diversifies_before_global_limit(self):
+        from app.services.rag.chunking import make_snapshot, chunk_transcript
+        from app.services.rag.types import SourceSegment
+        for meeting_id, count, vector in [('A',60,[1.,0.]), ('B',1,[.9,.1])]:
+            snapshot=make_snapshot(meeting_id,meeting_id,tuple(SourceSegment(i,'Việt Nam '+str(i),'A',i,i+1) for i in range(count)))
+            chunks=[replace(chunk_transcript(replace(snapshot,segments=(segment,)))[0],ordinal=i,source_id=meeting_id+':'+str(i)) for i,segment in enumerate(snapshot.segments)]
+            self.repository.publish(snapshot,self.profile,chunks,[vector for _ in chunks])
+        vector_hits,text_hits=self.repository.search('p','Việt',[1.,0.],None)
+        self.assertIn('B',{h.chunk.meeting_id for h in vector_hits})
+        self.assertIn('B',{h.chunk.meeting_id for h in text_hits})
+
+    def test_expired_leases_stop_at_three_attempts(self):
+        self.repository.queue(self.profile,self.snapshot)
+        for attempt in range(3):
+            self.assertIsNotNone(self.repository.claim())
+            self.connection.execute("UPDATE rag_index_jobs SET lease_until=now()-interval '1 second'")
+        self.assertIsNone(self.repository.claim())
+        row=self.connection.execute('SELECT state,attempts FROM rag_index_jobs').fetchone()
+        self.assertEqual(row,('failed',3))

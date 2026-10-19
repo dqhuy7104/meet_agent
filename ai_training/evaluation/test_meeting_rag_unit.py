@@ -24,3 +24,18 @@ class MetricsTest(unittest.TestCase):
         self.assertEqual(evaluate_citations({'valid'},['valid'])['precision'],1.)
         self.assertIsNone(human_scores(None))
         self.assertEqual(human_scores([{'supported':False,'usefulness':1}])['factual_support'],0.)
+
+    def test_server_revision_and_configuration_drift_is_rejected(self):
+        import evaluate_meeting_rag as evaluation
+        dataset={'meeting_revisions':{'a':'r1'}}
+        state={'meeting_revisions':{'a':'r2'},'embedding_profile':{'id':'p'},'prompt_hash':'hash'}
+        with self.assertRaisesRegex(ValueError,'evaluation_state_drift'):
+            evaluation.verify_server_state(dataset,state,'p')
+        state['meeting_revisions']={'a':'r1','extra':'r'}
+        with self.assertRaisesRegex(ValueError,'evaluation_state_drift'):
+            evaluation.verify_server_state(dataset,state,'p')
+
+    def test_human_ratings_require_matching_output_hash(self):
+        import evaluate_meeting_rag as evaluation
+        with self.assertRaisesRegex(ValueError,'rating_output_mismatch'):
+            evaluation.bound_human_scores({'output_hash':'old','claims':[{'supported':True,'usefulness':5}]},'new')

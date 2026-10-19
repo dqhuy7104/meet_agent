@@ -289,3 +289,11 @@ then restart the worker with `--backfill`; queued purges survive restarts. Run
 migrations with `--migrate --once` before starting a normal worker. Run isolated
 PG tests with `RAG_TEST_DATABASE_URL=<disposable-dsn> PYTHONPATH=apps/api uv run
 python -m unittest discover -s apps/api/tests -p 'test_rag_postgres_integration.py'`.
+
+The RAG worker reconnects after database outages. Embedding batch size respects
+vector dimensions and the response cap. Expired jobs stop after three claims;
+`--backfill` explicitly resets failures. API requests own their SQLite/PG
+connections in a background thread; cancellation returns without waiting for
+blocking cleanup, while that thread closes its resources and checks cancellation
+before further provider work. `/api/chat/evaluation-state` exposes only local
+revision/configuration metadata so evaluation can reject corpus or prompt drift.

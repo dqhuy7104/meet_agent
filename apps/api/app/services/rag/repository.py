@@ -33,6 +33,13 @@ class RagRepository:
         row = self.connection.execute('SELECT revision FROM rag_publications WHERE profile_id=%s AND meeting_id=%s', (profile_id, meeting_id)).fetchone()
         return row[0] if row else None
 
+    def validate_profile(self, profile: EmbeddingProfile) -> None:
+        row = self.connection.execute('SELECT definition FROM rag_embedding_profiles WHERE id=%s', (profile.id,)).fetchone()
+        if not row:
+            raise RagError('profile_not_ready', 409)
+        if row[0] != profile.model_dump():
+            raise RagError('immutable_profile_changed', 409)
+
     def manifests(self) -> list[tuple[str, str, str]]:
         return self.connection.execute('SELECT profile_id, meeting_id, revision FROM rag_publications').fetchall()
 
@@ -63,8 +70,10 @@ class RagRepository:
 
     def claim(self):
         with self.connection.transaction():
+            self.connection.execute("""UPDATE rag_index_jobs SET state='failed',failure_code='attempts_exhausted',lease_until=NULL
+                WHERE attempts>=3 AND (state='pending' OR (state='running' AND lease_until<now()))""")
             row = self.connection.execute("""SELECT profile_id,meeting_id,revision FROM rag_index_jobs
-                WHERE (state='pending' OR (state='running' AND lease_until<now())) AND next_attempt_at<=now()
+                WHERE attempts<3 AND (state='pending' OR (state='running' AND lease_until<now())) AND next_attempt_at<=now()
                 ORDER BY profile_id,meeting_id LIMIT 1 FOR UPDATE SKIP LOCKED""").fetchone()
             if row:
                 self.connection.execute("UPDATE rag_index_jobs SET state='running', attempts=attempts+1, lease_until=now()+interval '5 minutes' WHERE profile_id=%s AND meeting_id=%s", row[:2])
@@ -94,10 +103,17 @@ class RagRepository:
         scope = '' if meeting_ids is None else ' AND c.meeting_id = ANY(%s)'
         parameters = (json.dumps(vector), profile_id) + (() if meeting_ids is None else (meeting_ids,))
         # Materialize only this profile before cosine distance; dimensions may differ elsewhere.
-        base = '''WITH scoped AS MATERIALIZED (SELECT c.payload,c.source_id,c.document,e.embedding FROM rag_chunks c
+        base = '''WITH scoped AS MATERIALIZED (SELECT c.payload,c.source_id,c.meeting_id,c.document,e.embedding FROM rag_chunks c
             JOIN rag_chunk_embeddings e USING(profile_id,source_id) WHERE c.profile_id=%s''' + scope + ''')
-            SELECT payload,1-(embedding <=> %s::vector) AS cosine FROM scoped'''
+            , scored AS (SELECT *,1-(embedding <=> %s::vector) AS cosine FROM scoped)'''
         parameters = (profile_id,) + (() if meeting_ids is None else (meeting_ids,)) + (json.dumps(vector),)
-        vectors = self.connection.execute(base + ' ORDER BY cosine DESC,source_id LIMIT 50', parameters).fetchall()
-        texts = self.connection.execute(base + " WHERE document @@ plainto_tsquery('simple', %s) ORDER BY ts_rank(document,plainto_tsquery('simple', %s)) DESC,source_id LIMIT 50", parameters + (question, question)).fetchall()
+        vectors = self.connection.execute(base + ''' SELECT payload,cosine FROM
+            (SELECT *,row_number() OVER(PARTITION BY meeting_id ORDER BY cosine DESC,source_id) AS position FROM scored) diversified
+            ORDER BY position,cosine DESC,source_id LIMIT 50''', parameters).fetchall()
+        texts = self.connection.execute(base + """ , lexical AS
+            (SELECT *,ts_rank(document,plainto_tsquery('simple',%s)) AS lexical_score FROM scored
+             WHERE document @@ plainto_tsquery('simple',%s))
+            SELECT payload,cosine FROM (SELECT *,row_number() OVER
+            (PARTITION BY meeting_id ORDER BY lexical_score DESC,source_id) AS position FROM lexical) diversified
+            ORDER BY position,lexical_score DESC,source_id LIMIT 50""", parameters + (question, question)).fetchall()
         return ([Candidate(_chunk(p), float(c)) for p, c in vectors], [Candidate(_chunk(p), float(c)) for p, c in texts])
