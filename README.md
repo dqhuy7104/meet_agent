@@ -238,3 +238,54 @@ Meeting completion/deletion commits a payload-free SQLite outbox event without
 contacting PostgreSQL. During outages deletion still succeeds; the purge remains
 pending until the worker recovers. Query-time SQLite checks exclude stale sources
 before that purge completes. Startup reconciliation repairs missing publications.
+
+Enable `RAG_ENABLED=true`, set `RAG_MAX_K` (default 10), and configure server
+allowlists as JSON arrays in `.env`. Example local provider:
+
+```dotenv
+RAG_PROVIDERS_JSON='[{"id":"local","name":"Ollama","kind":"ollama","base_url":"http://127.0.0.1:11434","chat_models":[{"id":"qwen3","context_tokens":8192,"output_tokens":1024}],"embedding_models":["nomic-embed-text:latest"]}]'
+RAG_EMBEDDING_PROFILES_JSON='[{"id":"local-embed-v1","provider_id":"local","model":"nomic-embed-text:latest","revision":"sha256:REPLACE_WITH_ACTUAL_DIGEST","dimensions":768,"chunk_revision":"utf8-v1"}]'
+```
+
+Get the actual digest from Ollama `GET /api/tags`; dimensions must match the
+chosen model. Digest and dimension changes fail safely. Do not replace active
+model tags while requests run. Profiles are immutable: change the ID and rebuild
+when model revision, dimension or chunking changes. The initial cosine threshold
+`RAG_MIN_COSINE_SIMILARITY=0.35` is uncalibrated; use held-out evaluation before
+tuning it. Windows estimate tokens as UTF-8 bytes/3 (400 with 60 overlap); long
+segments retain segment-level timing, not invented word timestamps.
+
+For an external OpenAI-compatible server, add an entry like:
+
+```json
+{"id":"external","name":"Approved provider","kind":"openai_compatible","base_url":"https://provider.example/v1","api_key_env":"RAG_EXTERNAL_KEY","external_data_enabled":true,"chat_models":[{"id":"PINNED_CHAT_MODEL","context_tokens":8192,"output_tokens":1024}],"embedding_models":["PINNED_EMBEDDING_MODEL"]}
+```
+
+Set the key only in the server environment. External model revisions must use
+provider-supported immutable model IDs: their immutability is the provider's
+contract; identical-dimension silent model replacement cannot be detected
+universally. Obtain administrator approval for production meeting data before
+setting `external_data_enabled=true`. Indexing sends transcript chunks to the
+embedding provider; queries send questions to that provider and selected context
+to the chat provider. No automatic provider fallback is used.
+
+`GET /api/chat/providers` returns safe choices and ready profiles; `POST
+/api/chat/queries` accepts `question`, integer `k`, `chat_provider_id`,
+`chat_model_id`, `embedding_profile_id` and optional `meeting_ids`. An empty
+meeting list searches nothing. Errors use safe 422/409/503/504 codes. Requests
+are bounded to 60 seconds; provider responses to 128 KiB. Use the web page
+`/app/chat` to choose K/model/profile and open cited audio timestamps. This is
+local-only, single-user software: keep the API on loopback and access logs off.
+Sources are checked against SQLite before generation and at final validation;
+a concurrent change after final validation may still race response delivery.
+
+No credible evidence, conflicting/invalid output or missing citation IDs returns
+`insufficient_evidence`. Citation checks verify IDs and claim coverage; they
+cannot prove semantic entailment or prevent every hallucination. No real-provider
+quality baseline is claimed. Use the held-out evaluation workflow in
+`ai_training/evaluation/meeting_rag_dataset.md`, including human support ratings.
+To repair an unready index, check provider availability and immutable metadata,
+then restart the worker with `--backfill`; queued purges survive restarts. Run
+migrations with `--migrate --once` before starting a normal worker. Run isolated
+PG tests with `RAG_TEST_DATABASE_URL=<disposable-dsn> PYTHONPATH=apps/api uv run
+python -m unittest discover -s apps/api/tests -p 'test_rag_postgres_integration.py'`.
