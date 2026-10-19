@@ -217,3 +217,15 @@ decoding, and VAD. WER/CER remain means of per-sample error rates.
 `--model`, `--whisper-model`, `--language-model`, and `--device` override the
 corresponding API settings. Add `--env-file .env` after `uv run` to use local
 model settings from `.env`. No diarization is run for this ASR evaluation.
+
+## Meeting RAG (opt-in)
+
+SQLite remains authoritative; PostgreSQL is a disposable derived index. Start
+pgvector with `docker compose --env-file .env -f infra/compose.rag.yml up -d`.
+Set `RAG_POSTGRES_PASSWORD` locally and `RAG_DATABASE_URL` to its loopback DSN.
+The service pins pgvector 0.8.1 on PostgreSQL 17; review upgrades explicitly.
+Integration tests require a dedicated `RAG_TEST_DATABASE_URL`; they create and
+remove random schemas in that database, never existing meeting tables.
+Stop workers before backup; use `pg_dump` for the derived database and preserve
+the entire SQLite data directory separately. Roll back by disabling RAG and
+stopping its worker; existing audio and meeting routes remain independent.
