@@ -155,6 +155,13 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 meeting_id UNINDEXED, segment_id UNINDEXED, text, tokenize='unicode61'
             );
             CREATE INDEX IF NOT EXISTS meetings_created ON meetings(created_at DESC, id DESC);
+            CREATE TABLE IF NOT EXISTS rag_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('index', 'purge')),
+                revision TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         _migrate_meetings_table(connection)

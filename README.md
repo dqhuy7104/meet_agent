@@ -229,3 +229,12 @@ remove random schemas in that database, never existing meeting tables.
 Stop workers before backup; use `pg_dump` for the derived database and preserve
 the entire SQLite data directory separately. Roll back by disabling RAG and
 stopping its worker; existing audio and meeting routes remain independent.
+
+Run the separate index worker after configuration:
+`PYTHONPATH=apps/api uv run --env-file .env python -m app.services.rag.worker --migrate --backfill`.
+`--once` performs one synchronization/job iteration. Backfill also resets failed
+jobs for an explicit repair attempt. Only one RAG worker may own a data directory.
+Meeting completion/deletion commits a payload-free SQLite outbox event without
+contacting PostgreSQL. During outages deletion still succeeds; the purge remains
+pending until the worker recovers. Query-time SQLite checks exclude stale sources
+before that purge completes. Startup reconciliation repairs missing publications.

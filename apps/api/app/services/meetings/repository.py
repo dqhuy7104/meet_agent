@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
+from app.services.rag.outbox import enqueue_rag_event
 
 
 class IdempotencyConflict(ValueError):
@@ -222,6 +223,8 @@ class MeetingRepository:
             if cursor.rowcount != 1:
                 return
 
+            enqueue_rag_event(self.connection, meeting_id, "index")
+
     def fail(self, meeting_id: str, failure_code: str) -> None:
         """Mark processing failure without exposing partial results."""
         with self.connection:
@@ -229,6 +232,7 @@ class MeetingRepository:
             if meeting is None or meeting.status != "processing":
                 return
             self._clear_results(meeting_id)
+            enqueue_rag_event(self.connection, meeting_id, "purge")
             cursor = self.connection.execute(
                 """UPDATE meetings SET status='failed', failure_code=?, duration_seconds=NULL,
                    transcript=NULL, updated_at=? WHERE id=? AND status='processing'""",
@@ -265,6 +269,7 @@ class MeetingRepository:
             )
             if meeting.status != "cancelled":
                 self._clear_results(meeting_id)
+                enqueue_rag_event(self.connection, meeting_id, "purge")
                 self.connection.execute("DELETE FROM meeting_audio_files WHERE meeting_id=?", (meeting_id,))
                 self.connection.execute(
                     """UPDATE meetings SET status='cancelled', failure_code=NULL, duration_seconds=NULL,
@@ -287,6 +292,7 @@ class MeetingRepository:
                 return None
             if record.status != "failed":
                 raise MeetingStateConflict(meeting_id)
+            enqueue_rag_event(self.connection, meeting_id, "purge")
             cursor = self.connection.execute(
                 """UPDATE meetings SET status='queued', attempt_count=0, failure_code=NULL,
                    transcript=NULL, duration_seconds=NULL, updated_at=? WHERE id=? AND status='failed'""",
@@ -348,6 +354,7 @@ class MeetingRepository:
                 return None
             if meeting.status == "processing":
                 raise MeetingStateConflict(meeting_id)
+            enqueue_rag_event(self.connection, meeting_id, "purge")
             self._clear_results(meeting_id)
             self.connection.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
             self.connection.commit()
