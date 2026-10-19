@@ -1,0 +1,16 @@
+.rag-page { max-width: 1120px; }
+.rag-form, .rag-results { padding: 24px; margin-bottom: 24px; }
+.rag-form fieldset { border: 0; padding: 0; min-width: 0; }
+.rag-form legend { font-weight: 600; margin-bottom: 16px; }
+.rag-form label { display: block; font-weight: 500; margin-bottom: 8px; }
+.rag-form textarea, .rag-form select, .rag-form input { width: 100%; padding: 10px 12px; border: 1px solid #82909f; border-radius: 6px; background: transparent; color: inherit; font: inherit; }
+.rag-form textarea { resize: vertical; margin-bottom: 20px; }
+.rag-controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; margin-bottom: 20px; }
+.rag-controls select, .rag-controls input { display: block; margin-top: 8px; }
+.rag-page :focus-visible { outline: 3px solid #2766b3; outline-offset: 3px; }
+.rag-page button:disabled { opacity: .55; cursor: not-allowed; }
+.rag-results li { margin: 12px 0; overflow-wrap: anywhere; }
+.rag-results p, .rag-answer { white-space: pre-wrap; line-height: 1.65; }
+.rag-results a { color: #2160a5; text-decoration: underline; }
+.rag-status { display: block; margin-top: 12px; }
+@media (max-width: 640px) { .rag-controls { grid-template-columns: 1fr; } .rag-form, .rag-results { padding: 16px; } }

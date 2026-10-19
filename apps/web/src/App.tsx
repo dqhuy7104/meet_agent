@@ -13,6 +13,7 @@ import {
   Routes,
   useNavigate,
   useParams,
+  useSearchParams,
 } from "react-router-dom";
 import {
   ChevronLeft,
@@ -32,6 +33,7 @@ import {
 } from "lucide-react";
 import { ApiError, meetingApi, type BackendMeeting } from "./lib/api";
 import { MeetBotPanel } from "./components/MeetBotPanel";
+import { MeetingSearchChat } from "./components/MeetingSearchChat";
 import { findAudioPartAtTime } from "./lib/timeline";
 import type { ApiMeeting, MeetingStatus } from "./types/meeting";
 
@@ -68,6 +70,7 @@ function Shell({ children }: { children: ReactNode }) {
   const navigation = [
     ["/", "Tổng quan", LayoutDashboard],
     ["/meetings", "Cuộc họp", FileAudio],
+    ["/chat", "Hỏi từ cuộc họp", Search],
     ["/settings", "Cài đặt", Settings],
   ] as const;
   return (
@@ -520,6 +523,9 @@ function Workspace() {
   return <LocalWorkspace id={id} />;
 }
 function LocalWorkspace({ id }: { id: string }) {
+  const [searchParams] = useSearchParams();
+  const requestedTime = searchParams.get("t");
+  const locationSeek = useRef("");
   const [meeting, setMeeting] = useState<BackendMeeting>();
   const [error, setError] = useState("");
   const [deleteError, setDeleteError] = useState("");
@@ -561,7 +567,7 @@ function LocalWorkspace({ id }: { id: string }) {
       clearTimeout(timer);
     };
   }, [load]);
-  const seek = (seconds: number) => {
+  const seek = useCallback((seconds: number, shouldPlay = true) => {
     const parts = meeting?.audio_files ?? [];
     let uploadOffset = 0;
     const timing = parts.map((part) => {
@@ -573,11 +579,21 @@ function LocalWorkspace({ id }: { id: string }) {
     const index = findAudioPartAtTime(timing, seconds);
     if (index === null) return;
     const player = audios.current[parts[index].ordinal];
-    if (player) {
+    if (player && player.readyState >= 1) {
       player.currentTime = seconds - timing[index].start_seconds;
-      void player.play().catch(() => undefined);
+      if (shouldPlay) void player.play().catch(() => undefined);
+      return true;
     }
-  };
+    return false;
+  }, [meeting]);
+  const seekToSource = useCallback(() => {
+    const key = `${id}:${requestedTime}`;
+    if (requestedTime !== null && locationSeek.current !== key && meeting?.id === id) {
+      const seconds = Number(requestedTime);
+      if (Number.isFinite(seconds) && seconds >= 0 && seek(seconds, false)) locationSeek.current = key;
+    }
+  }, [id, requestedTime, meeting, seek]);
+  useEffect(() => { seekToSource(); }, [seekToSource]);
   const remove = async () => {
     if (!meeting || !window.confirm(`Xóa cuộc họp “${title(meeting)}”? Audio và transcript sẽ bị xóa.`)) return;
     setIsDeleting(true);
@@ -662,6 +678,7 @@ function LocalWorkspace({ id }: { id: string }) {
                   <audio
                     ref={(node) => { audios.current[part.ordinal] = node; }}
                     controls
+                    onLoadedMetadata={seekToSource}
                     aria-label={`Audio phần ${part.ordinal + 1}: ${part.original_filename}`}
                     src={meetingApi.audioUrl(id, part.ordinal)}
                     onPlay={() => audios.current.forEach((other, index) => {
@@ -774,6 +791,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Dashboard />} />
         <Route path="/meetings" element={<Meetings />} />
+        <Route path="/chat" element={<MeetingSearchChat />} />
         <Route path="/workspace/:id" element={<Workspace />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Routes>
