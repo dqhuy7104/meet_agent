@@ -1,0 +1,18 @@
+services:
+  rag-db:
+    image: pgvector/pgvector:0.8.1-pg17
+    environment:
+      POSTGRES_DB: ${RAG_POSTGRES_DB:-meeting_rag}
+      POSTGRES_USER: ${RAG_POSTGRES_USER:-meeting_rag}
+      POSTGRES_PASSWORD: ${RAG_POSTGRES_PASSWORD:?Set RAG_POSTGRES_PASSWORD locally}
+    ports:
+      - "127.0.0.1:${RAG_POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - rag-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+volumes:
+  rag-data:

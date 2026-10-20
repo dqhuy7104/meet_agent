@@ -55,9 +55,9 @@ def _migrate_meetings_table(connection: sqlite3.Connection) -> None:
         connection.execute("PRAGMA foreign_keys = ON")
 
 
-def open_meeting_db(data_dir: Path) -> sqlite3.Connection:
+def open_meeting_db(data_dir: Path, timeout: float = 30) -> sqlite3.Connection:
     """Open one configured connection to the local meeting database."""
-    connection = sqlite3.connect(data_dir / "meetings.sqlite3", timeout=30)
+    connection = sqlite3.connect(data_dir / "meetings.sqlite3", timeout=timeout)
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     connection.execute("PRAGMA journal_mode = WAL")
@@ -155,6 +155,13 @@ def initialize_meeting_store(data_dir: Path) -> None:
                 meeting_id UNINDEXED, segment_id UNINDEXED, text, tokenize='unicode61'
             );
             CREATE INDEX IF NOT EXISTS meetings_created ON meetings(created_at DESC, id DESC);
+            CREATE TABLE IF NOT EXISTS rag_outbox (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                meeting_id TEXT NOT NULL,
+                kind TEXT NOT NULL CHECK(kind IN ('index', 'purge')),
+                revision TEXT,
+                created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+            );
             """
         )
         _migrate_meetings_table(connection)
