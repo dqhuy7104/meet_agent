@@ -169,6 +169,17 @@ omit the URL. Meeting list/detail responses add `source`; detail audio parts
 add `start_seconds` so gaps remain visible in the timeline. Upload limits
 and `/api/audio/process` are unchanged.
 
+Creating a session only queues it; the separate bot runner must be running to
+open Chrome. If it stays `queued`, check that runner and its terminal output.
+The runner needs Chrome, `pactl`, FFmpeg, and the dedicated sink on the same
+machine. Stopping a session before the runner claims it cancels the queue entry
+immediately, so another session can start. An interrupted session can remain
+available for processing or deletion while a new session is created.
+If Meet shows "You can't join this video call", the runner reports
+`meeting_access_denied`; check the meeting's access setting and the Google
+account signed in to the bot's Chrome profile. The bot cannot override Meet's
+admission decision.
+
 Starting the API or runner adds SQLite tables and columns automatically.
 For backup, stop all three processes and copy the entire data directory.
 Before rollback, stop them, preserve or export that directory, and do not

@@ -126,8 +126,13 @@ class BotSessionRepository:
     def request_stop(self, session_id: str) -> BotSession | None:
         with self.connection:
             self.connection.execute(
+                """UPDATE bot_sessions SET status='cancelled', stop_requested=1,
+                   ended_at=?, url=NULL WHERE id=? AND status='queued'""",
+                (_now(), session_id),
+            )
+            self.connection.execute(
                 """UPDATE bot_sessions SET stop_requested=1 WHERE id=? AND status IN
-                   ('queued','joining','waiting_admission','recording')""", (session_id,)
+                   ('joining','waiting_admission','recording')""", (session_id,)
             )
         return self.get(session_id)
 

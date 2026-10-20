@@ -108,6 +108,7 @@ Install FFmpeg separately for API audio processing. Real-model evaluations need 
 - Treat `pipeline.md` as a proposed design: update it when the intended audio-to-RAG architecture changes, and mark newly implemented stages clearly. Record major cross-directory decisions in a design note.
 - Update Pydantic response models, route documentation, and examples together when the HTTP contract changes.
 - Describe breaking changes, migrations, rollback, and model-evaluation results in the change description when applicable.
+- Tài liệu làm việc cục bộ dưới `docs/` (bao gồm đặc tả brainstorming) phải giữ ngoài Git. Agent không được force-add, commit hoặc push chúng.
 
 # 11. Prohibited Shortcuts
 

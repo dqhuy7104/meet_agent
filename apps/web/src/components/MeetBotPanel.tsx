@@ -87,7 +87,7 @@ export function MeetBotPanel() {
       <div className="panel-head">
         <div><h3 id="meet-bot-title">Bot Google Meet</h3><p>Bot tham gia như một người dự họp và ghi audio trên máy này.</p></div>
       </div>
-      {!isActive && !session && (
+      {!isActive && (
         <form onSubmit={(event) => void start(event)}>
           <label>Link Google Meet
             <input type="url" required value={url} onChange={(event) => setUrl(event.target.value)}
@@ -107,6 +107,10 @@ export function MeetBotPanel() {
           {session.started_at && <span>Đã chạy: {Math.max(0, Math.floor((Date.now() - Date.parse(session.started_at)) / 60000))} phút</span>}
           {session.stop_requested && <span>Đã yêu cầu dừng bot.</span>}
           {session.failure_code && <span>Mã lỗi: {session.failure_code}</span>}
+          {session.failure_code === "meeting_access_denied" &&
+            <span>Google Meet đã từ chối bot. Kiểm tra quyền truy cập cuộc họp và tài khoản Google trong hồ sơ Chrome của bot.</span>}
+          {session.status === "queued" && Date.now() - Date.parse(session.created_at) > 10000 &&
+            <span>Bot chưa nhận yêu cầu. Hãy kiểm tra tiến trình bot runner đang chạy, sau đó kiểm tra Chrome và pactl trên máy chạy bot.</span>}
           <div className="bot-actions">
             {isActive && session.status !== "finalizing" && <button type="button" disabled={busy || session.stop_requested}
               onClick={() => void action("stop")}>Dừng bot</button>}
@@ -114,7 +118,6 @@ export function MeetBotPanel() {
               disabled={busy} onClick={() => void action("process")}>Xử lý phần đã ghi</button>}
             {session.status === "interrupted" && <button type="button" disabled={busy}
               onClick={() => void action("discard")}>Xóa bản ghi</button>}
-            {session.status === "cancelled" && <button type="button" onClick={() => setSession(null)}>Tạo phiên mới</button>}
           </div>
         </div>
       )}

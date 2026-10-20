@@ -7,6 +7,7 @@ import re
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from app.core.config import Settings
 from app.services.meetings.meet_browser import ChromeMeetBrowser, JoinFailed
@@ -46,6 +47,7 @@ class FakePage:
         self.closed = False
         self.controls_visible = True
         self.delayed_toggle = False
+        self.denied = False
 
     async def turn_off_mic_later(self) -> None:
         await asyncio.sleep(0.04)
@@ -55,6 +57,8 @@ class FakePage:
         self.url = url
 
     def labels(self) -> list[str]:
+        if self.denied:
+            return ["You can't join this video call"]
         if not self.controls_visible:
             return []
         labels = ["Join now", "Your name"] if not self.joined else []
@@ -184,3 +188,28 @@ class MeetBrowserTest(unittest.IsolatedAsyncioTestCase):
         page.delayed_toggle = True
         await self.browser.start("https://meet.google.com/abc-defg-hij")
         self.assertFalse(page.mic_on)
+
+    async def test_navigation_error_identifies_stage_without_exposing_link(self) -> None:
+        page = self.fake.context.page
+        with patch.object(page, "goto", side_effect=RuntimeError("private meeting URL")):
+            with self.assertRaisesRegex(JoinFailed, "^browser_navigation_failed$"):
+                await self.browser.start("https://meet.google.com/abc-defg-hij")
+
+    async def test_join_click_error_identifies_stage(self) -> None:
+        page = self.fake.context.page
+        page.mic_on = False
+        page.camera_on = False
+        with patch.object(FakeLocator, "click", side_effect=RuntimeError("private meeting URL")):
+            with self.assertRaisesRegex(JoinFailed, "^browser_join_click_failed$"):
+                await self.browser.start("https://meet.google.com/abc-defg-hij")
+
+    async def test_denied_meeting_reports_access_failure_before_waiting_for_controls(self) -> None:
+        self.fake.context.page.denied = True
+        with self.assertRaisesRegex(JoinFailed, "^meeting_access_denied$"):
+            await self.browser.start("https://meet.google.com/abc-defg-hij")
+
+    async def test_denied_after_join_reports_access_failure_without_admission_timeout(self) -> None:
+        await self.browser.start("https://meet.google.com/abc-defg-hij")
+        self.fake.context.page.denied = True
+        with self.assertRaisesRegex(JoinFailed, "^meeting_access_denied$"):
+            await self.browser.wait_for_admission(1, lambda: None)

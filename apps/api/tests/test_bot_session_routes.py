@@ -89,6 +89,22 @@ class BotSessionRouteTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.client.delete(f"/api/bot-sessions/{session_id}")).status_code, 204)
         self.assertEqual(self.repository.get(session_id).status, "cancelled")
 
+    async def test_stopping_unclaimed_session_frees_slot_without_runner(self) -> None:
+        first = await self.client.post("/api/bot-sessions", json={
+            "url": "https://meet.google.com/abc-defg-hij"
+        })
+        session_id = first.json()["id"]
+
+        stopped = await self.client.post(f"/api/bot-sessions/{session_id}/stop")
+
+        self.assertEqual(stopped.status_code, 200)
+        self.assertEqual(stopped.json()["status"], "cancelled")
+        self.assertIsNone(self.repository.get_active())
+        next_session = await self.client.post("/api/bot-sessions", json={
+            "url": "https://meet.google.com/xyz-abcd-efg"
+        })
+        self.assertEqual(next_session.status_code, 202)
+
     async def test_remote_peer_and_foreign_origin_are_forbidden(self) -> None:
         remote = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, client=("192.0.2.1", 4000)), base_url="http://localhost"
