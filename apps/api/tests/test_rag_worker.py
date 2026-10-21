@@ -7,19 +7,18 @@ from test_rag_postgres_integration import PostgresTest
 from test_rag_config import environment
 from test_rag_outbox import complete_meeting
 from app.core.rag_config import load_rag_settings, RagError
-from app.db.session import initialize_meeting_store, open_meeting_db
+from app.db.session import open_database
 from app.services.meetings.repository import MeetingRepository
 from app.services.rag.worker import synchronize_once
 
 
-@unittest.skipUnless(os.environ.get('RAG_TEST_DATABASE_URL'), 'PostgreSQL unavailable')
 class WorkerTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         PostgresTest.setUp(self)
-        self.temp = tempfile.TemporaryDirectory()
-        initialize_meeting_store(Path(self.temp.name))
-        self.sqlite = open_meeting_db(Path(self.temp.name))
-        self.meetings = MeetingRepository(self.sqlite)
+        self.source_db = self.connection
+        self.connection.execute('DELETE FROM meetings')
+        self.connection.execute('DELETE FROM rag_outbox')
+        self.meetings = MeetingRepository(self.source_db)
         self.settings = load_rag_settings(environment())
         # Same profile as settings; fixture profile is only used by PG tests.
         self.connection.execute('DELETE FROM rag_embedding_profiles')
@@ -29,8 +28,6 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
         self.client = Embedder()
 
     def tearDown(self):
-        self.sqlite.close()
-        self.temp.cleanup()
         PostgresTest.tearDown(self)
 
     async def test_backfill_empty_and_repeat_after_publish_ack_crash(self):
@@ -40,7 +37,7 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
                 await synchronize_once(self.meetings, self.repository, self.client, self.settings)
         await synchronize_once(self.meetings, self.repository, self.client, self.settings)
         self.assertEqual(self.connection.execute('SELECT count(*) FROM rag_chunk_embeddings').fetchone()[0], 1)
-        self.assertEqual(self.sqlite.execute('SELECT count(*) FROM rag_outbox').fetchone()[0], 0)
+        self.assertEqual(self.source_db.execute('SELECT count(*) FROM rag_outbox').fetchone()[0], 0)
         complete_meeting(self.meetings, 'empty', '')
         await synchronize_once(self.meetings, self.repository, self.client, self.settings)
         self.assertIsNotNone(self.repository.manifest('p', 'empty'))
@@ -57,14 +54,14 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.repository, 'purge', side_effect=RagError('database_unavailable')):
             with self.assertRaises(RagError):
                 await synchronize_once(self.meetings, self.repository, self.client, self.settings)
-        self.assertGreater(self.sqlite.execute('SELECT count(*) FROM rag_outbox').fetchone()[0], 0)
+        self.assertGreater(self.source_db.execute('SELECT count(*) FROM rag_outbox').fetchone()[0], 0)
         await synchronize_once(self.meetings, self.repository, self.client, self.settings)
-        self.assertEqual(self.sqlite.execute('SELECT count(*) FROM rag_outbox').fetchone()[0], 0)
+        self.assertEqual(self.source_db.execute('SELECT count(*) FROM rag_outbox').fetchone()[0], 0)
 
     async def test_reconciliation_and_retired_profile(self):
         complete_meeting(self.meetings)
-        self.sqlite.execute('DELETE FROM rag_outbox')
-        self.sqlite.commit()
+        self.source_db.execute('DELETE FROM rag_outbox')
+        self.source_db.commit()
         await synchronize_once(self.meetings, self.repository, self.client, self.settings)
         self.assertIsNotNone(self.repository.manifest('p', 'm'))
         from dataclasses import replace
@@ -102,7 +99,7 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
         def connect(settings):
             calls.append('connect')
             if len(calls)==1:raise psycopg.OperationalError('startup outage')
-            return psycopg.connect(os.environ['RAG_TEST_DATABASE_URL'],autocommit=True,options='-c search_path='+self.schema+',public')
+            return psycopg.connect(self.database.database_url.get_secret_value(),autocommit=True)
         synchronization=[]
         async def synchronize(*args):
             synchronization.append(1)
@@ -110,6 +107,6 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
             raise Finished()
         async def pause(*args):pass
         args=argparse.Namespace(once=False,migrate=False,backfill=False)
-        with patch('app.services.rag.worker.load_rag_settings',return_value=self.settings),patch('app.services.rag.worker.get_settings',return_value=Settings(meeting_data_dir=Path(self.temp.name))),patch('app.services.rag.worker.open_rag_db',side_effect=connect),patch('app.services.rag.worker.synchronize_once',side_effect=synchronize),patch('app.services.rag.worker.asyncio.sleep',side_effect=pause):
+        with patch('app.services.rag.worker.load_rag_settings',return_value=self.settings),patch('app.services.rag.worker.get_settings',return_value=Settings(meeting_data_dir=self.data_dir)),patch('app.services.rag.worker.open_database',side_effect=connect),patch('app.services.rag.worker.synchronize_once',side_effect=synchronize),patch('app.services.rag.worker.asyncio.sleep',side_effect=pause):
             with self.assertRaises(Finished):await _run(args)
         self.assertGreaterEqual(len(calls),3)

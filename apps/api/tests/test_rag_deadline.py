@@ -14,12 +14,12 @@ from test_rag_config import environment
 class DeadlineTest(unittest.IsolatedAsyncioTestCase):
     async def test_deadline_returns_while_database_dependency_is_blocked(self):
         release=threading.Event()
-        def blocked(settings):
+        def blocked(settings, **kwargs):
             release.wait(1)
             raise RagError('index_unavailable')
         app=FastAPI();app.include_router(router,prefix='/api')
         try:
-            with patch.dict(os.environ,environment()),patch('app.db.rag_session.open_rag_db',side_effect=blocked),patch('app.api.routes.chat.QUERY_TIMEOUT_SECONDS',.05,create=True):
+            with patch.dict(os.environ,environment()),patch('app.db.session.open_database',side_effect=blocked),patch('app.api.routes.chat.QUERY_TIMEOUT_SECONDS',.05,create=True):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app,client=('127.0.0.1',1)),base_url='http://localhost') as client:
                     start=time.monotonic()
                     response=await asyncio.wait_for(client.get('/api/chat/providers'),timeout=.4)

@@ -5,6 +5,7 @@ from contextlib import closing
 from dataclasses import dataclass, field
 import threading
 import time
+from app.core.database_config import DatabaseSettings, DatabaseUnavailableError
 from app.core.rag_config import RagError, RagSettings, ProviderRegistry
 from app.schemas.chat import RagQuery
 
@@ -22,8 +23,9 @@ class RequestDeadline:
 
 
 class RagRequestService:
-    def __init__(self, settings: RagSettings) -> None:
+    def __init__(self, settings: RagSettings, database: DatabaseSettings) -> None:
         self.settings = settings
+        self.database = database
         self.registry = ProviderRegistry(settings)
 
     async def _invoke(self, action: str, *arguments):
@@ -38,12 +40,9 @@ class RagRequestService:
             executor.shutdown(wait=False, cancel_futures=True)
 
     def _serve(self, deadline: RequestDeadline, action: str, arguments: tuple):
-        import sqlite3
         import httpx
         import psycopg
-        from app.core.config import get_settings
-        from app.db.rag_session import open_rag_db
-        from app.db.session import open_meeting_db
+        from app.db.session import open_database, validate_database
         from app.services.meetings.repository import MeetingRepository
         from app.services.rag.providers import ModelClient
         from app.services.rag.query import QueryService
@@ -52,21 +51,35 @@ class RagRequestService:
         async def run():
             deadline.remaining()
             try:
-                with open_rag_db(self.settings) as connection:
-                    deadline.remaining()
-                    with closing(open_meeting_db(get_settings().meeting_data_dir, timeout=.25)) as sqlite:
-                        sqlite.set_progress_handler(lambda: int(deadline.cancelled.is_set() or time.monotonic() >= deadline.expires_at), 1000)
-                        repository = RagRepository(connection)
-                        class Database:
-                            async def call(self, method, *args):
-                                remaining = deadline.remaining()
-                                connection.execute("SELECT set_config('statement_timeout',%s,false)", (str(max(1, int(min(10, remaining)*1000))),))
-                                return getattr(repository, method)(*args)
-                        async with httpx.AsyncClient() as http:
-                            client = ModelClient(self.registry, http, deadline.remaining)
-                            service = QueryService(self.settings, self.registry, MeetingRepository(sqlite), Database(), client)
-                            return await getattr(service, action)(*arguments)
-            except (psycopg.Error, sqlite3.Error):
+                with open_database(self.database, timeout_seconds=min(5, deadline.remaining())) as connection:
+                    def before_query():
+                        remaining = deadline.remaining()
+                        connection.execute("SELECT set_config('statement_timeout',%s,false)",
+                            (str(max(1, int(min(10, remaining)*1000))),))
+                    before_query()
+                    validate_database(connection)
+                    repository = RagRepository(connection)
+                    meetings = MeetingRepository(connection)
+                    class Source:
+                        def get_detail(inner, meeting_id):
+                            before_query()
+                            detail = meetings.get_detail(meeting_id)
+                            deadline.remaining()
+                            return detail
+                        def completed_meeting_ids(inner):
+                            before_query()
+                            return meetings.completed_meeting_ids()
+                    class Database:
+                        async def call(inner, method, *args):
+                            before_query()
+                            result = getattr(repository, method)(*args)
+                            deadline.remaining()
+                            return result
+                    async with httpx.AsyncClient() as http:
+                        client = ModelClient(self.registry, http, deadline.remaining)
+                        service = QueryService(self.settings, self.registry, Source(), Database(), client)
+                        return await getattr(service, action)(*arguments)
+            except (psycopg.Error, DatabaseUnavailableError):
                 deadline.remaining()
                 raise RagError('index_unavailable') from None
         return asyncio.run(run())

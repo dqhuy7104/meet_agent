@@ -5,6 +5,8 @@ from psycopg import Connection
 from psycopg.types.json import Jsonb
 from app.core.rag_config import EmbeddingProfile, RagError
 from app.services.rag.providers import validate_vectors
+from app.services.meetings.repository import MeetingRepository
+from app.services.rag.chunking import snapshot_meeting
 from app.services.rag.types import Candidate, MeetingSnapshot, SourceChunk, SourceSegment
 
 
@@ -46,6 +48,10 @@ class RagRepository:
     def publish(self, snapshot: MeetingSnapshot, profile: EmbeddingProfile, chunks: list[SourceChunk], vectors: list[list[float]]) -> None:
         validate_vectors(vectors, len(chunks), profile.dimensions)
         with self.connection.transaction():
+            row = self.connection.execute("SELECT status FROM meetings WHERE id=%s FOR UPDATE", (snapshot.meeting_id,)).fetchone()
+            detail = MeetingRepository(self.connection).get_detail(snapshot.meeting_id) if row and row[0] == 'completed' else None
+            if detail is None or snapshot_meeting(detail).revision != snapshot.revision:
+                raise RagError('stale_source', 409)
             self.register_profiles([profile])
             self.connection.execute('DELETE FROM rag_publications WHERE profile_id=%s AND meeting_id=%s', (profile.id, snapshot.meeting_id))
             self.connection.execute('INSERT INTO rag_publications VALUES (%s,%s,%s)', (profile.id, snapshot.meeting_id, snapshot.revision))

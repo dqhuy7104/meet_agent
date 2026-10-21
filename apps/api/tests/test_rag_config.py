@@ -6,7 +6,7 @@ from app.schemas.chat import RagQuery
 
 
 def environment(kind='openai_compatible'):
-    return {'RAG_ENABLED': 'true', 'RAG_DATABASE_URL': 'postgresql://secret@localhost/rag',
+    return {'RAG_ENABLED': 'true', 'DATABASE_URL': 'postgresql://test@localhost/rag',
             'KEY': 'private-token', 'RAG_PROVIDERS_JSON': json.dumps([{
                 'id': 'local', 'name': 'Local', 'kind': kind, 'base_url': 'http://127.0.0.1:11434',
                 'api_key_env': 'KEY', 'chat_models': [{'id': 'chat', 'context_tokens': 4096, 'output_tokens': 512}],

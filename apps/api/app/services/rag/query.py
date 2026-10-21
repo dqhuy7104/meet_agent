@@ -1,4 +1,4 @@
-"""Query orchestration with independent SQLite eligibility checks."""
+"""Query orchestration with authoritative PostgreSQL eligibility checks."""
 from app.core.rag_config import RagError, RagSettings, ProviderRegistry
 from app.schemas.chat import RagQuery, SelectedMeeting
 from app.services.rag.answering import generate_answer, insufficient
@@ -19,12 +19,12 @@ class QueryService:
         await self.rag.call('validate_profile', self.registry.resolve_profile(profile_id))
         if not await self.rag.call('is_profile_ready', profile_id):
             return False
-        rows = self.meetings.connection.execute("SELECT id FROM meetings WHERE status='completed'").fetchall()
+        rows = self.meetings.completed_meeting_ids()
         for row in rows:
-            detail = self.meetings.get_detail(row[0])
+            detail = self.meetings.get_detail(row)
             if detail and detail.meeting.status == 'completed':
                 snapshot = snapshot_meeting(detail)
-                if await self.rag.call('manifest', profile_id, row[0]) != snapshot.revision:
+                if await self.rag.call('manifest', profile_id, row) != snapshot.revision:
                     return False
         return True
 
@@ -46,10 +46,10 @@ class QueryService:
         if not await self.ready(profile_id):
             raise RagError('profile_not_ready', 409)
         revisions = {}
-        for row in self.meetings.connection.execute("SELECT id FROM meetings WHERE status='completed'"):
-            detail = self.meetings.get_detail(row[0])
+        for row in self.meetings.completed_meeting_ids():
+            detail = self.meetings.get_detail(row)
             if detail and detail.meeting.status == 'completed':
-                revisions[row[0]] = snapshot_meeting(detail).revision
+                revisions[row] = snapshot_meeting(detail).revision
         return dict(meeting_revisions=revisions, embedding_profile=profile.model_dump(),
                     prompt_version=self.settings.prompt_version, prompt_hash=PROMPT_HASH,
                     chat_provider_id=provider_id, chat_model=selection.model.model_dump(),

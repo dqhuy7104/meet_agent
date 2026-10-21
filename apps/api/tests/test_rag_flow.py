@@ -9,7 +9,6 @@ from app.services.rag.query import QueryService
 from app.services.rag.worker import synchronize_once
 
 
-@unittest.skipUnless(os.environ.get('RAG_TEST_DATABASE_URL'), 'PostgreSQL unavailable')
 class FlowTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         WorkerTest.setUp(self)

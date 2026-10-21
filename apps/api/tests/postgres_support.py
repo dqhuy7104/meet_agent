@@ -72,3 +72,19 @@ class PostgresAsyncTestCase(unittest.IsolatedAsyncioTestCase):
         from app.main import app
         app.dependency_overrides[get_meeting_database_settings] = lambda: self.database
         self.addCleanup(app.dependency_overrides.clear)
+
+
+def seed_snapshot(connection, snapshot):
+    """Publish test source data through the real meeting repository."""
+    import uuid
+    from app.services.meetings.repository import MeetingRepository
+    from app.schemas.transcript import AudioProcessResponse, TranscriptSegment
+    from app.services.rag.chunking import snapshot_meeting
+    repository = MeetingRepository(connection)
+    if repository.get_meeting(snapshot.meeting_id) is None:
+        repository.create_meeting(snapshot.meeting_id, snapshot.title, 'source.wav', uuid.uuid4().hex, 'hash', None)
+    connection.execute("UPDATE meetings SET status='processing',title=%s WHERE id=%s", (snapshot.title, snapshot.meeting_id))
+    repository.complete(snapshot.meeting_id, AudioProcessResponse(filename='source.wav', duration_seconds=max((s.end_seconds for s in snapshot.segments), default=0),
+        transcript=' '.join(s.text for s in snapshot.segments), vad_segments=[], diarization_segments=[],
+        transcript_segments=[TranscriptSegment(start=s.start_seconds,end=s.end_seconds,speaker=s.speaker,text=s.text) for s in snapshot.segments]))
+    return snapshot_meeting(repository.get_detail(snapshot.meeting_id))
