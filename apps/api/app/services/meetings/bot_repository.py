@@ -106,7 +106,7 @@ class BotSessionRepository:
                     if row:
                         if row["url_hash"] != hashlib.sha256(url.encode()).hexdigest():
                             raise BotStateConflict("Idempotency key belongs to another link")
-                            return _session(row)
+                        return _session(row)
                 if self.get_active():
                     raise BotStateConflict("A bot session is already active")
                 session_id = uuid.uuid4().hex

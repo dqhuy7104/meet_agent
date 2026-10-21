@@ -3,46 +3,33 @@
 from __future__ import annotations
 
 import hashlib
-import sqlite3
+import psycopg
 import stat
 import tempfile
 import unittest
 from pathlib import Path
 
 from app.core.config import ConfigurationError, Settings
-from app.db.session import initialize_meeting_store, open_meeting_db
+from apps.api.tests.postgres_support import PostgresTestCase
+from app.services.meetings.storage import initialize_meeting_storage
 from app.services.meetings.repository import IdempotencyConflict, MeetingRepository
 from app.services.meetings.storage import audio_path, cleanup_orphaned_audio, publish_audio
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 
 
-class MeetingStoreTest(unittest.TestCase):
+class MeetingStoreTest(PostgresTestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.data_dir = Path(self.temporary.name) / "meetings"
-        initialize_meeting_store(self.data_dir)
-        self.connection = open_meeting_db(self.data_dir)
-        self.addCleanup(self.connection.close)
+        super().setUp()
+        initialize_meeting_storage(self.data_dir, self.connection)
         self.repository = MeetingRepository(self.connection)
 
     def test_initialization_is_idempotent_and_private(self) -> None:
-        initialize_meeting_store(self.data_dir)
+        initialize_meeting_storage(self.data_dir, self.connection)
         self.assertEqual(stat.S_IMODE(self.data_dir.stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE((self.data_dir / "audio").stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE((self.data_dir / "tmp").stat().st_mode), 0o700)
-        self.assertEqual(self.connection.execute("PRAGMA foreign_keys").fetchone()[0], 1)
-        self.assertEqual(self.connection.execute("PRAGMA journal_mode").fetchone()[0], "wal")
-        self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_fts").fetchone()[0], 0)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 0)
 
-    def test_existing_meeting_migrates_with_upload_source(self) -> None:
-        key = publish_audio(self.data_dir, b"old audio")
-        self.repository.create_meeting("old", None, "old.wav", key, "checksum", None)
-        self.connection.execute("ALTER TABLE meetings DROP COLUMN source")
-        self.connection.execute("ALTER TABLE meeting_audio_files DROP COLUMN start_seconds")
-        self.connection.commit()
-        initialize_meeting_store(self.data_dir)
-        self.assertEqual(self.repository.get_meeting("old").source, "upload")
 
     def test_publish_uses_opaque_private_name(self) -> None:
         key = publish_audio(self.data_dir, b"private recording")
@@ -57,15 +44,15 @@ class MeetingStoreTest(unittest.TestCase):
         orphan = publish_audio(self.data_dir, b"orphan")
         self.repository.create_meeting("m1", None, "user/meeting.wav", kept, hashlib.sha256(b"kept").hexdigest(), None)
         (self.data_dir / "tmp" / "abandoned").write_bytes(b"partial")
-        cleanup_orphaned_audio(self.data_dir)
+        cleanup_orphaned_audio(self.data_dir, self.repository)
         self.assertTrue(audio_path(self.data_dir, kept).exists())
         self.assertFalse(audio_path(self.data_dir, orphan).exists())
         self.assertEqual(list((self.data_dir / "tmp").iterdir()), [])
 
     def test_failed_insert_can_remove_published_audio(self) -> None:
         key = publish_audio(self.data_dir, b"unlinked")
-        self.connection.execute("DROP TABLE meetings")
-        with self.assertRaises(sqlite3.OperationalError):
+        self.connection.execute("DROP TABLE meetings CASCADE")
+        with self.assertRaises(psycopg.errors.UndefinedTable):
             self.repository.create_meeting("m1", None, "original.wav", key, "checksum", None)
         audio_path(self.data_dir, key).unlink()
         self.assertFalse(audio_path(self.data_dir, key).exists())
@@ -107,41 +94,8 @@ class MeetingStoreTest(unittest.TestCase):
         self.assertEqual(record.pipeline_pid, 123)
         self.assertIsNotNone(record.cancelled_at)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 0)
-        self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_fts").fetchone()[0], 0)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 0)
 
-    def test_initialization_migrates_existing_meeting_store(self) -> None:
-        old_dir = Path(self.temporary.name) / "old-meetings"
-        old_dir.mkdir()
-        connection = sqlite3.connect(old_dir / "meetings.sqlite3")
-        try:
-            connection.execute(
-                """CREATE TABLE meetings (
-                id TEXT PRIMARY KEY, title TEXT, original_filename TEXT NOT NULL, storage_key TEXT NOT NULL UNIQUE,
-                checksum TEXT NOT NULL, idempotency_key TEXT UNIQUE, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
-                status TEXT NOT NULL, attempt_count INTEGER NOT NULL DEFAULT 0, duration_seconds REAL,
-                failure_code TEXT, transcript TEXT)"""
-            )
-            connection.execute(
-                """INSERT INTO meetings VALUES
-                ('m1', NULL, 'meeting.wav', 'key', 'checksum', NULL, 'now', 'now', 'completed', 1, 1.0, NULL, 'done')"""
-            )
-            connection.commit()
-        finally:
-            connection.close()
-
-        initialize_meeting_store(old_dir)
-
-        migrated = open_meeting_db(old_dir)
-        try:
-            columns = {row[1] for row in migrated.execute("PRAGMA table_info(meetings)")}
-            self.assertTrue({"pipeline_pid", "pipeline_start_ticks", "cancelled_at"}.issubset(columns))
-            self.assertEqual(migrated.execute("SELECT transcript FROM meetings WHERE id='m1'").fetchone()[0], "done")
-            parts = MeetingRepository(migrated).get_audio_files("m1")
-            self.assertEqual([(part.ordinal, part.original_filename, part.storage_key) for part in parts], [
-                (0, "meeting.wav", "key")
-            ])
-        finally:
-            migrated.close()
 
 
 if __name__ == "__main__":

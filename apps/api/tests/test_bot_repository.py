@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 
 from apps.api.tests.postgres_support import PostgresTestCase
+from app.services.meetings.storage import initialize_meeting_storage
 from app.services.meetings.bot_repository import BotSessionRepository, BotStateConflict
 from app.services.meetings.repository import MeetingRepository
 from app.services.meetings.storage import audio_path, cleanup_orphaned_audio, publish_audio_file
@@ -18,8 +19,7 @@ from app.services.meetings.storage import audio_path, cleanup_orphaned_audio, pu
 class BotRepositoryTest(PostgresTestCase):
     def setUp(self) -> None:
         super().setUp()
-        for name in ('audio', 'tmp', 'bot-tmp'):
-            (self.data_dir / name).mkdir(parents=True, exist_ok=True)
+        initialize_meeting_storage(self.data_dir, self.connection)
         self.repository = BotSessionRepository(self.connection, self.data_dir)
 
     def test_concurrent_create_allows_one_active_session(self) -> None:

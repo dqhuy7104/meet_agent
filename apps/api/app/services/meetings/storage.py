@@ -5,7 +5,10 @@ from __future__ import annotations
 import fcntl
 import os
 import re
-import sqlite3
+import psycopg
+
+from app.core.database_config import DatabaseUnavailableError
+from app.services.meetings.repository import MeetingRepository
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
@@ -62,18 +65,44 @@ def publish_audio_file(data_dir: Path, temporary_path: Path) -> str:
     return storage_key
 
 
-def cleanup_orphaned_audio(data_dir: Path) -> None:
-    """Remove files from interrupted uploads, retaining referenced audio."""
+def initialize_meeting_storage(data_dir: Path, connection: psycopg.Connection) -> None:
+    """Bind a private empty root to this database before publishing or cleaning."""
+    data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    data_dir.chmod(0o700)
     with audio_publication_lock(data_dir):
-        for temporary in (data_dir / "tmp").iterdir():
+        _validate_storage_identity(data_dir, connection)
+
+
+def _validate_storage_identity(data_dir: Path, connection: psycopg.Connection) -> None:
+    identity = str(connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0])
+    marker = data_dir / '.database-identity'
+    if marker.exists():
+        if marker.read_text().strip() != identity:
+            raise DatabaseUnavailableError('storage_identity_mismatch')
+    else:
+        for name in ('audio', 'tmp', 'bot-tmp'):
+            directory = data_dir / name
+            if directory.exists() and any(directory.iterdir()):
+                raise DatabaseUnavailableError('storage_root_not_empty')
+        descriptor = os.open(marker, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(descriptor, 'w') as output:
+            output.write(identity + '\n')
+            output.flush()
+            os.fsync(output.fileno())
+    for name in ('audio', 'tmp', 'bot-tmp'):
+        directory = data_dir / name
+        directory.mkdir(exist_ok=True, mode=0o700)
+        directory.chmod(0o700)
+
+
+def cleanup_orphaned_audio(data_dir: Path, repository: MeetingRepository) -> None:
+    """Read authoritative references before deleting any private files."""
+    with audio_publication_lock(data_dir):
+        _validate_storage_identity(data_dir, repository.connection)
+        referenced = repository.referenced_audio_keys()
+        for temporary in (data_dir / 'tmp').iterdir():
             if temporary.is_file() or temporary.is_symlink():
                 temporary.unlink(missing_ok=True)
-        connection = sqlite3.connect(data_dir / "meetings.sqlite3")
-        try:
-            referenced = {row[0] for row in connection.execute("SELECT storage_key FROM meeting_audio_files")}
-            referenced.update(row[0] for row in connection.execute("SELECT storage_key FROM bot_session_parts"))
-        finally:
-            connection.close()
-        for audio in (data_dir / "audio").iterdir():
+        for audio in (data_dir / 'audio').iterdir():
             if audio.name not in referenced and (audio.is_file() or audio.is_symlink()):
                 audio.unlink(missing_ok=True)
