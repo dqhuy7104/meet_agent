@@ -47,3 +47,11 @@ class DatabaseMigrationTest(unittest.TestCase):
             fixture.connection.execute("INSERT INTO schema_migrations(version,checksum) VALUES (999,'future')")
             with self.assertRaises(DatabaseUnavailableError):
                 validate_database(fixture.connection)
+
+    def test_invalid_audio_intervals_and_ordinals_are_rejected(self) -> None:
+        from app.services.meetings.repository import MeetingRepository
+        with isolated_postgres() as fixture:
+            MeetingRepository(fixture.connection).create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+            for values in ((-1, 0, 1), (0, -1, 1), (0, 2, 1)):
+                with self.subTest(values=values), self.assertRaises(psycopg.errors.CheckViolation):
+                    fixture.connection.execute('INSERT INTO vad_segments VALUES (%s,%s,%s,%s)', ('m', *values))

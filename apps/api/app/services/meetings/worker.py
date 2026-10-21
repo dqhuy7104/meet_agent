@@ -175,14 +175,13 @@ def run_once(repository: MeetingRepository, data_dir: Path, settings: Settings,
 def main() -> None:
     settings, database = get_settings(), get_database_settings()
     data_dir = settings.meeting_data_dir
-    with open_database(database) as connection:
-        validate_database(connection)
-        initialize_meeting_storage(data_dir, connection)
+    data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with exclusive_worker_lock(data_dir):
         try:
             while True:
                 try:
                     with worker_lease(database, 'meeting') as lease, open_database(database) as connection:
+                        initialize_meeting_storage(data_dir, connection)
                         repository = MeetingRepository(connection)
                         repository.recover_interrupted()
                         cleanup_orphaned_audio(data_dir, repository)

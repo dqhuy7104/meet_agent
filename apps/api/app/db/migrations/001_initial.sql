@@ -1,84 +1,84 @@
 CREATE EXTENSION IF NOT EXISTS vector WITH SCHEMA public;
 
-            CREATE TABLE meetings (
-                id TEXT PRIMARY KEY,
-                title TEXT,
-                original_filename TEXT NOT NULL,
-                storage_key TEXT NOT NULL UNIQUE,
-                checksum TEXT NOT NULL,
-                idempotency_key TEXT UNIQUE,
-                created_at timestamptz NOT NULL,
-                updated_at timestamptz NOT NULL,
-                status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed', 'cancelled')),
-                attempt_count INTEGER NOT NULL DEFAULT 0,
-                duration_seconds double precision,
-                failure_code TEXT,
-                transcript TEXT,
-                pipeline_pid INTEGER,
-                pipeline_start_ticks INTEGER,
-                cancelled_at timestamptz
-                ,source TEXT NOT NULL DEFAULT 'upload'
-            );
-            CREATE TABLE vad_segments (
-                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-                ordinal INTEGER NOT NULL,
-                start_seconds double precision NOT NULL,
-                end_seconds double precision NOT NULL,
-                PRIMARY KEY (meeting_id, ordinal)
-            );
-            CREATE TABLE diarization_segments (
-                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-                ordinal INTEGER NOT NULL,
-                start_seconds double precision NOT NULL,
-                end_seconds double precision NOT NULL,
-                speaker TEXT NOT NULL,
-                PRIMARY KEY (meeting_id, ordinal)
-            );
-            CREATE TABLE transcript_segments (
-                id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-                ordinal INTEGER NOT NULL,
-                start_seconds double precision NOT NULL,
-                end_seconds double precision NOT NULL,
-                speaker TEXT NOT NULL,
-                text TEXT NOT NULL,
- document tsvector GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED,
-                UNIQUE (meeting_id, ordinal)
-            );
-            CREATE TABLE meeting_audio_files (
-                meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
-                ordinal INTEGER NOT NULL,
-                original_filename TEXT NOT NULL,
-                storage_key TEXT NOT NULL UNIQUE,
-                duration_seconds double precision,
-                start_seconds double precision,
-                PRIMARY KEY (meeting_id, ordinal)
-            );
-            CREATE TABLE bot_sessions (
-                id TEXT PRIMARY KEY,
-                url TEXT,
-                url_hash TEXT NOT NULL,
-                title TEXT,
-                idempotency_key TEXT UNIQUE,
-                status TEXT NOT NULL CHECK(status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing', 'completed', 'interrupted', 'cancelled')),
-                failure_code TEXT,
-                created_at timestamptz NOT NULL,
-                started_at timestamptz,
-                ended_at timestamptz,
-                stop_requested boolean NOT NULL DEFAULT false,
-                meeting_id TEXT REFERENCES meetings(id),
-                capture_incomplete boolean NOT NULL DEFAULT false
-            );
-            CREATE TABLE bot_session_parts (
-                session_id TEXT NOT NULL REFERENCES bot_sessions(id) ON DELETE CASCADE,
-                ordinal INTEGER NOT NULL,
-                storage_key TEXT NOT NULL UNIQUE,
-                start_seconds double precision NOT NULL,
-                duration_seconds double precision NOT NULL,
-                PRIMARY KEY (session_id, ordinal)
-            );
-            CREATE UNIQUE INDEX one_active_bot_session ON bot_sessions((1))
-                WHERE status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing');
+CREATE TABLE meetings (
+    id TEXT PRIMARY KEY,
+    title TEXT,
+    original_filename TEXT NOT NULL,
+    storage_key TEXT NOT NULL UNIQUE,
+    checksum TEXT NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    created_at timestamptz NOT NULL,
+    updated_at timestamptz NOT NULL,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'processing', 'completed', 'failed', 'cancelled')),
+    attempt_count INTEGER NOT NULL DEFAULT 0 CHECK(attempt_count >= 0),
+    duration_seconds double precision CHECK(duration_seconds >= 0 AND duration_seconds < 'Infinity'::float8),
+    failure_code TEXT,
+    transcript TEXT,
+    pipeline_pid INTEGER,
+    pipeline_start_ticks INTEGER,
+    cancelled_at timestamptz,
+    source TEXT NOT NULL DEFAULT 'upload'
+);
+CREATE TABLE vad_segments (
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    start_seconds double precision NOT NULL CHECK(start_seconds >= 0),
+    end_seconds double precision NOT NULL CHECK(end_seconds > start_seconds AND end_seconds < 'Infinity'::float8),
+    PRIMARY KEY (meeting_id, ordinal)
+);
+CREATE TABLE diarization_segments (
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    start_seconds double precision NOT NULL CHECK(start_seconds >= 0),
+    end_seconds double precision NOT NULL CHECK(end_seconds > start_seconds AND end_seconds < 'Infinity'::float8),
+    speaker TEXT NOT NULL,
+    PRIMARY KEY (meeting_id, ordinal)
+);
+CREATE TABLE transcript_segments (
+    id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    start_seconds double precision NOT NULL CHECK(start_seconds >= 0),
+    end_seconds double precision NOT NULL CHECK(end_seconds > start_seconds AND end_seconds < 'Infinity'::float8),
+    speaker TEXT NOT NULL,
+    text TEXT NOT NULL,
+    document tsvector GENERATED ALWAYS AS (to_tsvector('simple', text)) STORED,
+    UNIQUE (meeting_id, ordinal)
+);
+CREATE TABLE meeting_audio_files (
+    meeting_id TEXT NOT NULL REFERENCES meetings(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    original_filename TEXT NOT NULL,
+    storage_key TEXT NOT NULL UNIQUE,
+    duration_seconds double precision CHECK(duration_seconds >= 0 AND duration_seconds < 'Infinity'::float8),
+    start_seconds double precision CHECK(start_seconds >= 0 AND start_seconds < 'Infinity'::float8),
+    PRIMARY KEY (meeting_id, ordinal)
+);
+CREATE TABLE bot_sessions (
+    id TEXT PRIMARY KEY,
+    url TEXT,
+    url_hash TEXT NOT NULL,
+    title TEXT,
+    idempotency_key TEXT UNIQUE,
+    status TEXT NOT NULL CHECK(status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing', 'completed', 'interrupted', 'cancelled')),
+    failure_code TEXT,
+    created_at timestamptz NOT NULL,
+    started_at timestamptz,
+    ended_at timestamptz,
+    stop_requested boolean NOT NULL DEFAULT false,
+    meeting_id TEXT REFERENCES meetings(id),
+    capture_incomplete boolean NOT NULL DEFAULT false
+);
+CREATE TABLE bot_session_parts (
+    session_id TEXT NOT NULL REFERENCES bot_sessions(id) ON DELETE CASCADE,
+    ordinal INTEGER NOT NULL CHECK(ordinal >= 0),
+    storage_key TEXT NOT NULL UNIQUE,
+    start_seconds double precision NOT NULL CHECK(start_seconds >= 0),
+    duration_seconds double precision NOT NULL CHECK(duration_seconds > 0 AND duration_seconds <= 1800),
+    PRIMARY KEY (session_id, ordinal)
+);
+CREATE UNIQUE INDEX one_active_bot_session ON bot_sessions((1))
+    WHERE status IN ('queued', 'joining', 'waiting_admission', 'recording', 'finalizing');
 
 CREATE INDEX meetings_created ON meetings(created_at DESC, id DESC);
 CREATE TABLE rag_outbox (

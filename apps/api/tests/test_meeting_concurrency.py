@@ -52,6 +52,7 @@ class MeetingConcurrencyTest(PostgresTestCase):
         self.assertEqual(self.connection.execute("SELECT kind FROM rag_outbox").fetchall(), [("purge",)])
 
     def test_idempotency_rolls_back_and_timestamps_remain_strings(self) -> None:
+        self.connection.execute("SET TIME ZONE 'Asia/Ho_Chi_Minh'")
         with self.assertRaises(IdempotencyConflict):
             self.repository.create_meeting("m2", None, "b.wav", "b" * 32, "other", "key")
         self.assertIsNone(self.repository.get_meeting("m2"))

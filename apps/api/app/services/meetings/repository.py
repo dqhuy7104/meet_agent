@@ -85,7 +85,7 @@ def _record(row: dict[str, Any]) -> MeetingRecord:
     values = dict(row)
     for name in ("created_at", "updated_at", "cancelled_at"):
         if values[name] is not None:
-            values[name] = values[name].isoformat()
+            values[name] = values[name].astimezone(timezone.utc).isoformat()
     return MeetingRecord(**values)
 
 

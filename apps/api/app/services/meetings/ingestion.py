@@ -39,7 +39,7 @@ def ingest_meeting(database: DatabaseSettings, data_dir: Path, parts: list[tuple
                     published.append((filename, publish_audio(data_dir, data)))
                 return repository.create_meeting(meeting_id, title, parts[0][0], published[0][1],
                     checksum, idempotency_key, audio_files=published)
-            except psycopg.OperationalError:
+            except (psycopg.OperationalError, psycopg.InterfaceError):
                 # The server may have committed before its acknowledgement was lost.
                 with open_database(database) as recovery:
                     record = MeetingRepository(recovery).get_meeting(meeting_id)

@@ -147,3 +147,65 @@ class BotRunnerTest(PostgresAsyncTestCase):
             with self.assertRaises(asyncio.CancelledError):
                 await task
             self.assertTrue(recorder.finished.is_set())
+
+    async def test_database_loss_during_cancellation_still_closes_resources(self):
+        import psycopg
+        from app.services.meetings import bot_runner
+        browser, recorder = FakeBrowser(self.settings), FakeRecorder(self.settings)
+        connections = []
+        real_connect = bot_runner.open_database
+        def connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+        with patch.object(bot_runner, 'check_bot_runtime'), patch.object(bot_runner, 'open_database', side_effect=connect):
+            task = asyncio.create_task(run_session(self.session.id, self.data_dir, self.settings, lambda _: browser, lambda _: recorder))
+            for _ in range(100):
+                if recorder.calls > 1:
+                    break
+                await asyncio.sleep(.01)
+            with patch.object(BotSessionRepository, 'get', side_effect=psycopg.OperationalError('offline')):
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+        self.assertTrue(browser.closed)
+        self.assertTrue(connections)
+        self.assertTrue(all(connection.closed for connection in connections))
+
+    async def test_browser_close_failure_still_closes_database(self):
+        from app.services.meetings import bot_runner
+        from unittest.mock import AsyncMock
+        browser, recorder = FakeBrowser(self.settings), FakeRecorder(self.settings)
+        browser.close = AsyncMock(side_effect=RuntimeError('browser close failed'))
+        connections = []
+        real_connect = bot_runner.open_database
+        def connect(*args, **kwargs):
+            connection = real_connect(*args, **kwargs)
+            connections.append(connection)
+            return connection
+        with patch.object(bot_runner, 'check_bot_runtime'), patch.object(bot_runner, 'open_database', side_effect=connect):
+            task = asyncio.create_task(run_session(self.session.id, self.data_dir, self.settings, lambda _: browser, lambda _: recorder))
+            for _ in range(100):
+                if recorder.calls > 1:
+                    break
+                await asyncio.sleep(.01)
+            self.repository.request_stop(self.session.id)
+            with self.assertRaisesRegex(RuntimeError, 'browser close failed'):
+                await task
+        self.assertTrue(all(connection.closed for connection in connections))
+
+    def test_ambiguous_part_commit_retains_referenced_file(self):
+        import psycopg
+        from app.services.meetings.bot_runner import _register_part
+        self.repository.set_status(self.session.id, 'recording')
+        temporary = self.data_dir / 'bot-tmp' / 'part.wav'
+        temporary.write_bytes(b'private recording')
+        original = BotSessionRepository.add_part
+        def commit_then_disconnect(repository, *args, **kwargs):
+            original(repository, *args, **kwargs)
+            raise psycopg.InterfaceError('acknowledgement lost')
+        with patch.object(BotSessionRepository, 'add_part', commit_then_disconnect):
+            with self.assertRaises(psycopg.InterfaceError):
+                _register_part(self.repository, self.data_dir, self.session.id, temporary, RecordedPart(1.0, 1.0, 2.0), None)
+        part = self.repository.parts(self.session.id)[0]
+        self.assertEqual((self.data_dir / 'audio' / part.storage_key).read_bytes(), b'private recording')

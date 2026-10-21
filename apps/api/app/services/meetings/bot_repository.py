@@ -54,7 +54,7 @@ def _session(row: dict[str, Any]) -> BotSession:
     values = dict(row)
     for name in ('created_at', 'started_at', 'ended_at'):
         if values[name] is not None:
-            values[name] = values[name].isoformat()
+            values[name] = values[name].astimezone(timezone.utc).isoformat()
     return BotSession(**values)
 
 

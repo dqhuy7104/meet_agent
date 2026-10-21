@@ -20,7 +20,7 @@ from app.services.meetings.storage import audio_path, audio_publication_lock, cl
 
 @contextmanager
 def exclusive_bot_lock(data_dir: Path) -> Iterator[None]:
-    descriptor = os.open(data_dir / 'bot-runner.lock', os.O_CREAT | os.O_RDWR, 384)
+    descriptor = os.open(data_dir / 'bot-runner.lock', os.O_CREAT | os.O_RDWR, 0o600)
     try:
         fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
         yield
@@ -41,7 +41,7 @@ def _register_part(repository: BotSessionRepository, data_dir: Path, session_id:
         key = publish_audio_file(data_dir, temporary_path)
         try:
             repository.add_part(session_id, key, start_seconds, part.duration_seconds)
-        except psycopg.OperationalError:
+        except (psycopg.OperationalError, psycopg.InterfaceError):
             raise
         except BaseException:
             audio_path(data_dir, key).unlink(missing_ok=True)
@@ -49,8 +49,23 @@ def _register_part(repository: BotSessionRepository, data_dir: Path, session_id:
     return origin
 
 async def run_session(session_id: str, data_dir: Path, settings: Settings, browser_factory: Callable[..., ChromeMeetBrowser]=ChromeMeetBrowser, recorder_factory: Callable[..., PulseWavRecorder]=PulseWavRecorder, *, database: DatabaseSettings | None=None) -> None:
-    """Run a claimed session until stop, end, or a safe interruption."""
-    connection = open_database(database or get_database_settings())
+    opening = asyncio.create_task(asyncio.to_thread(open_database, database or get_database_settings()))
+    try:
+        connection = await asyncio.shield(opening)
+    except asyncio.CancelledError:
+        connection = await opening
+        await asyncio.to_thread(connection.close)
+        raise
+    try:
+        await asyncio.to_thread(validate_database, connection)
+        await _run_session(connection, session_id, data_dir, settings, browser_factory, recorder_factory)
+    finally:
+        await asyncio.to_thread(connection.close)
+
+
+async def _run_session(connection: psycopg.Connection, session_id: str, data_dir: Path,
+                       settings: Settings, browser_factory: Callable, recorder_factory: Callable) -> None:
+
     repository = BotSessionRepository(connection, data_dir)
     browser: ChromeMeetBrowser | None = None
     end_task: asyncio.Task[None] | None = None
@@ -114,6 +129,8 @@ async def run_session(session_id: str, data_dir: Path, settings: Settings, brows
         current = await asyncio.to_thread(repository.get, session_id)
         if current and current.status not in {'completed', 'cancelled', 'interrupted'}:
             await asyncio.to_thread(repository.set_status, session_id, 'interrupted', str(error))
+    except psycopg.Error:
+        raise
     except Exception:
         current = await asyncio.to_thread(repository.get, session_id)
         if current and current.status not in {'completed', 'cancelled', 'interrupted'}:
@@ -135,20 +152,21 @@ async def run_session(session_id: str, data_dir: Path, settings: Settings, brows
         if browser is not None:
             await browser.close()
         if asyncio.current_task() and asyncio.current_task().cancelling():
-            current = await asyncio.to_thread(repository.get, session_id)
-            if current and current.status not in {'completed', 'cancelled', 'interrupted'}:
-                await asyncio.to_thread(repository.set_status, session_id, 'interrupted', 'runner_interrupted')
-        connection.close()
+            try:
+                current = await asyncio.to_thread(repository.get, session_id)
+                if current and current.status not in {'completed', 'cancelled', 'interrupted'}:
+                    await asyncio.to_thread(repository.set_status, session_id, 'interrupted', 'runner_interrupted')
+            except psycopg.Error:
+                pass  # Recovery marks the session interrupted after reconnection.
 
 async def _run_loop(settings: Settings) -> None:
     data_dir, database = (settings.meeting_data_dir, get_database_settings())
-    with open_database(database) as connection:
-        validate_database(connection)
-        initialize_meeting_storage(data_dir, connection)
+    data_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
     with exclusive_bot_lock(data_dir):
         while True:
             try:
                 with worker_lease(database, 'bot') as lease, open_database(database) as connection:
+                    await asyncio.to_thread(initialize_meeting_storage, data_dir, connection)
                     repository = BotSessionRepository(connection, data_dir)
                     await asyncio.to_thread(repository.recover_stale)
                     await asyncio.to_thread(cleanup_orphaned_audio, data_dir, MeetingRepository(connection))

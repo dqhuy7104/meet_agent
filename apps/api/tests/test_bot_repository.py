@@ -45,7 +45,9 @@ class BotRepositoryTest(PostgresTestCase):
         self.assertIsNotNone(self.repository.get_active())
 
     def test_reused_key_with_different_link_conflicts(self) -> None:
+        self.connection.execute("SET TIME ZONE 'Asia/Ho_Chi_Minh'")
         first = self.repository.create("https://meet.google.com/abc-defg-hij", None, "key")
+        self.assertTrue(first.created_at.endswith('+00:00'))
         self.assertEqual(self.repository.create(first.url, None, "key").id, first.id)
         with self.assertRaises(BotStateConflict):
             self.repository.create("https://meet.google.com/xyz-abcd-efg", None, "key")
