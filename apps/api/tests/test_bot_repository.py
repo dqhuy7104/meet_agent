@@ -2,37 +2,34 @@
 
 from __future__ import annotations
 
-import sqlite3
+import psycopg
 import stat
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
-from app.db.session import initialize_meeting_store, open_meeting_db
+from apps.api.tests.postgres_support import PostgresTestCase
 from app.services.meetings.bot_repository import BotSessionRepository, BotStateConflict
 from app.services.meetings.repository import MeetingRepository
 from app.services.meetings.storage import audio_path, cleanup_orphaned_audio, publish_audio_file
 
 
-class BotRepositoryTest(unittest.TestCase):
+class BotRepositoryTest(PostgresTestCase):
     def setUp(self) -> None:
-        self.temporary = tempfile.TemporaryDirectory()
-        self.addCleanup(self.temporary.cleanup)
-        self.data_dir = Path(self.temporary.name) / "data"
-        initialize_meeting_store(self.data_dir)
-        self.connection = open_meeting_db(self.data_dir)
-        self.addCleanup(self.connection.close)
-        self.repository = BotSessionRepository(self.connection)
+        super().setUp()
+        for name in ('audio', 'tmp', 'bot-tmp'):
+            (self.data_dir / name).mkdir(parents=True, exist_ok=True)
+        self.repository = BotSessionRepository(self.connection, self.data_dir)
 
     def test_concurrent_create_allows_one_active_session(self) -> None:
         outcomes: list[str] = []
 
         def create(suffix: str) -> None:
-            connection = open_meeting_db(self.data_dir)
+            connection = self.open_connection()
             try:
                 try:
-                    BotSessionRepository(connection).create(f"https://meet.google.com/{suffix}", None, None)
+                    BotSessionRepository(connection, self.data_dir).create(f"https://meet.google.com/{suffix}", None, None)
                     outcomes.append("created")
                 except BotStateConflict:
                     outcomes.append("conflict")
@@ -94,7 +91,7 @@ class BotRepositoryTest(unittest.TestCase):
         kept = self._part(b"kept")
         orphan = self._part(b"orphan")
         self.repository.add_part(session.id, kept, 0, 1)
-        cleanup_orphaned_audio(self.data_dir)
+        cleanup_orphaned_audio(self.data_dir, MeetingRepository(self.connection))
         self.assertTrue(audio_path(self.data_dir, kept).exists())
         self.assertFalse(audio_path(self.data_dir, orphan).exists())
         self.assertEqual(stat.S_IMODE(audio_path(self.data_dir, kept).stat().st_mode), 0o600)
