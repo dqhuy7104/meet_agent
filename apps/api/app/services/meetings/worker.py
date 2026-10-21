@@ -15,7 +15,9 @@ from typing import Iterator
 
 from app.core.audio_models import ModelLoadError, ModelRegistry
 from app.core.config import Settings, get_settings
-from app.db.session import initialize_meeting_store, open_meeting_db
+from app.db.session import open_database, validate_database
+from app.core.database_config import get_database_settings
+from app.services.meetings.storage import initialize_meeting_storage
 from app.pipelines.meeting_pipeline import process_audio
 from app.services.audio.preprocess import AudioTooLongError, InvalidAudioError
 from app.services.meetings.repository import MeetingAudioFile, MeetingRepository

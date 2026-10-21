@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import re
-from collections.abc import AsyncIterator
+from collections.abc import Iterator
 from typing import Annotated
 from urllib.parse import urlsplit
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 
-from app.api.routes.meetings import get_meeting_settings, require_loopback
+from app.api.routes.meetings import get_meeting_settings, get_meeting_database_settings, require_loopback
 from app.core.config import Settings
-from app.db.session import initialize_meeting_store, open_meeting_db
+from app.db.session import open_database, validate_database
+from app.core.database_config import DatabaseSettings
+from app.services.meetings.storage import initialize_meeting_storage
 from app.schemas.bot_session import BotSessionCreate, BotSessionResponse
 from app.services.meetings.bot_repository import BotSession, BotSessionRepository, BotStateConflict
 from app.services.meetings.repository import MeetingRepository
@@ -34,15 +36,14 @@ def canonical_meet_url(url: str) -> str:
     return f"https://meet.google.com{parsed.path}"
 
 
-async def get_bot_repository(
+def get_bot_repository(
     settings: Annotated[Settings, Depends(get_meeting_settings)],
-) -> AsyncIterator[BotSessionRepository]:
-    initialize_meeting_store(settings.meeting_data_dir)
-    connection = open_meeting_db(settings.meeting_data_dir)
-    try:
-        yield BotSessionRepository(connection)
-    finally:
-        connection.close()
+    database: Annotated[DatabaseSettings, Depends(get_meeting_database_settings)],
+) -> Iterator[BotSessionRepository]:
+    with open_database(database) as connection:
+        validate_database(connection)
+        initialize_meeting_storage(settings.meeting_data_dir, connection)
+        yield BotSessionRepository(connection, settings.meeting_data_dir)
 
 
 def _response(repository: BotSessionRepository, session: BotSession) -> BotSessionResponse:
@@ -66,7 +67,7 @@ def _get(repository: BotSessionRepository, session_id: str) -> BotSession:
 
 
 @router.post("", response_model=BotSessionResponse, status_code=status.HTTP_202_ACCEPTED)
-async def create_bot_session(
+def create_bot_session(
     body: BotSessionCreate,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
@@ -82,7 +83,7 @@ async def create_bot_session(
 
 
 @router.get("/active", response_model=BotSessionResponse | None)
-async def get_active_bot_session(
+def get_active_bot_session(
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
 ) -> BotSessionResponse | Response:
     session = repository.get_active()
@@ -90,7 +91,7 @@ async def get_active_bot_session(
 
 
 @router.get("/recent", response_model=BotSessionResponse | None)
-async def get_recent_interrupted_bot_session(
+def get_recent_interrupted_bot_session(
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
 ) -> BotSessionResponse | Response:
     session = repository.get_recent_interrupted()
@@ -98,14 +99,14 @@ async def get_recent_interrupted_bot_session(
 
 
 @router.get("/{session_id}", response_model=BotSessionResponse)
-async def get_bot_session(
+def get_bot_session(
     session_id: str, repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
 ) -> BotSessionResponse:
     return _response(repository, _get(repository, session_id))
 
 
 @router.post("/{session_id}/stop", response_model=BotSessionResponse)
-async def stop_bot_session(
+def stop_bot_session(
     session_id: str, repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
 ) -> BotSessionResponse:
     session = _get(repository, session_id)
@@ -116,7 +117,7 @@ async def stop_bot_session(
 
 
 @router.post("/{session_id}/process-parts", response_model=BotSessionResponse)
-async def process_bot_parts(
+def process_bot_parts(
     session_id: str,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
@@ -135,7 +136,7 @@ async def process_bot_parts(
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def discard_bot_session(
+def discard_bot_session(
     session_id: str,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],

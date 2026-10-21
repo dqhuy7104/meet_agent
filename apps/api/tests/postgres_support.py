@@ -54,3 +54,14 @@ class PostgresTestCase(unittest.TestCase):
 
     def open_connection(self) -> psycopg.Connection:
         return psycopg.connect(self.database.database_url.get_secret_value(), autocommit=True)
+
+
+class PostgresAsyncTestCase(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        fixture = self.enterContext(isolated_postgres())
+        self.database, self.connection = fixture.database, fixture.connection
+        self.data_dir, self.schema = fixture.data_dir, fixture.schema
+        from app.api.routes.meetings import get_meeting_database_settings
+        from app.main import app
+        app.dependency_overrides[get_meeting_database_settings] = lambda: self.database
+        self.addCleanup(app.dependency_overrides.clear)

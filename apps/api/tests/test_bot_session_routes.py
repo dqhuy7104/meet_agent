@@ -1,6 +1,7 @@
 """Local bot control API contracts."""
 
 from __future__ import annotations
+from apps.api.tests.postgres_support import PostgresAsyncTestCase
 
 import tempfile
 import unittest
@@ -10,21 +11,22 @@ import httpx
 
 from app.api.routes.meetings import get_meeting_settings
 from app.core.config import Settings
-from app.db.session import initialize_meeting_store, open_meeting_db
+from app.db.session import open_database
+from app.services.meetings.storage import initialize_meeting_storage
 from app.main import app
 from app.services.meetings.bot_repository import BotSessionRepository
 from app.services.meetings.storage import publish_audio
 
 
-class BotSessionRouteTest(unittest.IsolatedAsyncioTestCase):
+class BotSessionRouteTest(PostgresAsyncTestCase):
     async def asyncSetUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.data_dir = Path(self.temporary.name) / "data"
-        initialize_meeting_store(self.data_dir)
-        self.connection = open_meeting_db(self.data_dir)
+        initialize_meeting_storage(self.data_dir, self.connection)
+        self.connection = open_database(self.database)
         self.addCleanup(self.connection.close)
-        self.repository = BotSessionRepository(self.connection)
+        self.repository = BotSessionRepository(self.connection, self.data_dir)
 
         async def settings() -> Settings:
             return Settings(meeting_data_dir=self.data_dir)

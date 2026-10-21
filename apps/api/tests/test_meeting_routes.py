@@ -1,8 +1,9 @@
 """HTTP upload and local-access contracts for stored meetings."""
 
 from __future__ import annotations
+from apps.api.tests.postgres_support import PostgresAsyncTestCase
 
-import sqlite3
+import psycopg
 import tempfile
 import threading
 import unittest
@@ -13,14 +14,15 @@ import httpx
 
 from app.api.routes.meetings import get_meeting_settings
 from app.core.config import Settings
-from app.db.session import open_meeting_db
+from app.db.session import open_database
 from app.main import app
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 from app.services.meetings.repository import MeetingRepository
 
 
-class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
+class MeetingUploadTest(PostgresAsyncTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.data_dir = Path(self.temporary.name) / "meetings"
@@ -53,7 +55,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(body["original_filename"], "private.wav")
         self.assertTrue(body["meeting_id"])
         self.assertTrue(body["created_at"])
-        self.assertEqual(len(list((self.data_dir / "audio").iterdir())), 1)
+        self.assertEqual(len(list((self.data_dir / "audio").glob("*"))), 1)
 
     async def test_multiple_files_create_one_meeting_and_preserve_order(self) -> None:
         response = await self.client.post(
@@ -76,7 +78,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             b"second",
         )
         self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
-        self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
+        self.assertEqual(list((self.data_dir / "audio").glob("*")), [])
 
     async def test_multiple_files_reject_empty_part_without_persisting(self) -> None:
         response = await self.client.post(
@@ -84,7 +86,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             files=[("files", ("a.wav", b"valid", "audio/wav")), ("files", ("empty.wav", b"", "audio/wav"))],
         )
         self.assertEqual(response.status_code, 400)
-        self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
+        self.assertEqual(list((self.data_dir / "audio").glob("*")), [])
 
     async def test_multi_file_idempotency_uses_ordered_content(self) -> None:
         first = [("files", ("a.wav", b"a", "audio/wav")), ("files", ("b.wav", b"b", "audio/wav"))]
@@ -95,7 +97,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(original.status_code, 202)
         self.assertEqual(repeated.json()["meeting_id"], original.json()["meeting_id"])
         self.assertEqual(conflict.status_code, 409)
-        self.assertEqual(len(list((self.data_dir / "audio").iterdir())), 2)
+        self.assertEqual(len(list((self.data_dir / "audio").glob("*"))), 2)
 
     async def test_empty_upload_is_400(self) -> None:
         response = await self._upload(b"")
@@ -115,7 +117,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first.status_code, 202)
         self.assertEqual(second.status_code, 202)
         self.assertEqual(second.json(), first.json())
-        self.assertEqual(len(list((self.data_dir / "audio").iterdir())), 1)
+        self.assertEqual(len(list((self.data_dir / "audio").glob("*"))), 1)
 
     async def test_same_key_with_different_audio_is_409(self) -> None:
         await self._upload(b"first", key="request-1")
@@ -125,7 +127,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
     async def test_replay_reports_current_completed_status(self) -> None:
         first = await self._upload(b"audio", key="request-1")
         meeting_id = first.json()["meeting_id"]
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             repository = MeetingRepository(connection)
             repository.claim_next()
@@ -154,7 +156,8 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
 
             def clean() -> None:
                 cleanup_started.set()
-                cleanup_orphaned_audio(self.data_dir)
+                with open_database(self.database) as connection:
+                    cleanup_orphaned_audio(self.data_dir, MeetingRepository(connection))
                 cleanup_done.set()
 
             cleaner = threading.Thread(target=clean, daemon=True)
@@ -171,7 +174,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             for cleaner in cleaners:
                 cleaner.join(timeout=2)
         self.assertEqual(response.status_code, 202)
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             record = MeetingRepository(connection).get_meeting(response.json()["meeting_id"])
             self.assertTrue((self.data_dir / "audio" / record.storage_key).exists())
@@ -184,10 +187,10 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(first.json()["meeting_id"], second.json()["meeting_id"])
 
     async def test_failed_insert_removes_published_audio(self) -> None:
-        with patch("app.services.meetings.repository.MeetingRepository.create_meeting", side_effect=sqlite3.OperationalError):
+        with patch("app.services.meetings.repository.MeetingRepository.create_meeting", side_effect=psycopg.errors.CheckViolation):
             response = await self._upload(b"private")
-        self.assertEqual(response.status_code, 500)
-        self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(list((self.data_dir / "audio").glob("*")), [])
 
     async def test_non_loopback_peer_cannot_forge_local_headers(self) -> None:
         remote = httpx.AsyncClient(
@@ -249,7 +252,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queued.status_code, 200)
         self.assertIsNone(queued.json()["transcript"])
         self.assertEqual(queued.json()["transcript_segments"], [])
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             repository = MeetingRepository(connection)
             repository.claim_next()
@@ -293,7 +296,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_delete_removes_audio_rows_and_search_entries(self) -> None:
         meeting_id = (await self._upload(b"audio")).json()["meeting_id"]
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             repository = MeetingRepository(connection)
             repository.claim_next()
@@ -306,7 +309,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             deleted = await self.client.delete(f"/api/meetings/{meeting_id}")
             self.assertEqual(deleted.status_code, 204)
             self.assertEqual(repository.get_meeting(meeting_id).status, "cancelled")
-            self.assertEqual(connection.execute("SELECT count(*) FROM transcript_fts").fetchone()[0], 0)
+            self.assertEqual(connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 0)
             self.assertFalse((self.data_dir / "audio" / key).exists())
             self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
         finally:
@@ -314,7 +317,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_processing_meeting_is_cancelled_and_audio_is_removed(self) -> None:
         meeting_id = (await self._upload(b"audio")).json()["meeting_id"]
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             repository = MeetingRepository(connection)
             record = repository.claim_next()
@@ -335,7 +338,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
     async def test_queued_and_failed_meetings_can_be_deleted(self) -> None:
         failed_id = (await self._upload(b"failed")).json()["meeting_id"]
         queued_id = (await self._upload(b"queued")).json()["meeting_id"]
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             repository = MeetingRepository(connection)
             repository.claim_next()
@@ -345,7 +348,7 @@ class MeetingUploadTest(unittest.IsolatedAsyncioTestCase):
             for meeting_id in (queued_id, failed_id):
                 self.assertEqual((await self.client.delete(f"/api/meetings/{meeting_id}")).status_code, 204)
                 self.assertEqual(repository.get_meeting(meeting_id).status, "cancelled")
-            self.assertEqual(list((self.data_dir / "audio").iterdir()), [])
+            self.assertEqual(list((self.data_dir / "audio").glob("*")), [])
         finally:
             connection.close()
 

@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import ipaddress
-import sqlite3
+import psycopg
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Annotated
 from urllib.parse import urlsplit
@@ -16,7 +16,11 @@ from fastapi.responses import FileResponse
 
 from app.api.routes.audio import MAX_UPLOAD_BYTES
 from app.core.config import Settings, get_settings
-from app.db.session import initialize_meeting_store, open_meeting_db
+from app.db.session import open_database, validate_database
+from app.core.database_config import DatabaseSettings, get_database_settings
+from app.services.meetings.storage import initialize_meeting_storage
+from app.services.meetings.ingestion import ingest_meeting
+from starlette.concurrency import run_in_threadpool
 from app.schemas.meeting import (
     MeetingAcceptedResponse, MeetingDetailResponse, MeetingListResponse, MeetingMetadataResponse,
     MeetingAudioFileResponse, MeetingSearchResponse, SearchHitResponse,
@@ -69,14 +73,18 @@ async def get_meeting_settings() -> Settings:
     return get_settings()
 
 
-async def get_meeting_repository(settings: Annotated[Settings, Depends(get_meeting_settings)]) -> AsyncIterator[MeetingRepository]:
-    """Open and close one SQLite connection for this request."""
-    initialize_meeting_store(settings.meeting_data_dir)
-    connection = open_meeting_db(settings.meeting_data_dir)
-    try:
+def get_meeting_database_settings() -> DatabaseSettings:
+    return get_database_settings()
+
+
+def get_meeting_repository(
+    settings: Annotated[Settings, Depends(get_meeting_settings)],
+    database: Annotated[DatabaseSettings, Depends(get_meeting_database_settings)],
+) -> Iterator[MeetingRepository]:
+    with open_database(database) as connection:
+        validate_database(connection)
+        initialize_meeting_storage(settings.meeting_data_dir, connection)
         yield MeetingRepository(connection)
-    finally:
-        connection.close()
 
 
 def _accepted(record: MeetingRecord) -> MeetingAcceptedResponse:
@@ -102,7 +110,7 @@ def _metadata(record: MeetingRecord) -> MeetingMetadataResponse:
 
 @router.post("", response_model=MeetingAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
 async def upload_meeting(
-    repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
+    database: Annotated[DatabaseSettings, Depends(get_meeting_database_settings)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
     file: Annotated[UploadFile | None, File(description="One original audio file, up to 25 MiB")] = None,
     files: Annotated[list[UploadFile] | None, File(description="Ordered meeting audio files")] = None,
@@ -137,46 +145,15 @@ async def upload_meeting(
             await upload.close()
     if idempotency_key == "":
         raise HTTPException(status_code=422, detail="Idempotency-Key must not be empty")
-    if len(parts) == 1:
-        checksum = hashlib.sha256(parts[0][1]).hexdigest()
-    else:
-        digest = hashlib.sha256()
-        for _, data in parts:
-            digest.update(len(data).to_bytes(8, "big"))
-            digest.update(data)
-        checksum = digest.hexdigest()
-    if idempotency_key:
-        existing = repository.find_by_idempotency_key(idempotency_key)
-        if existing:
-            if existing.checksum != checksum:
-                raise HTTPException(status_code=409, detail="Idempotency key belongs to different audio")
-            return _accepted(existing)
-
-    with audio_publication_lock(settings.meeting_data_dir):
-        published: list[tuple[str, str]] = []
-        try:
-            for filename, data in parts:
-                published.append((filename, publish_audio(settings.meeting_data_dir, data)))
-            record = repository.create_meeting(
-                uuid.uuid4().hex, title, published[0][0], published[0][1], checksum, idempotency_key,
-                audio_files=published,
-            )
-        except IdempotencyConflict as error:
-            for _, storage_key in published:
-                audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
-            existing = repository.find_by_idempotency_key(idempotency_key)
-            if existing and existing.checksum == checksum:
-                return _accepted(existing)
-            raise HTTPException(status_code=409, detail="Idempotency key belongs to different audio") from error
-        except (sqlite3.Error, OSError):
-            for _, storage_key in published:
-                audio_path(settings.meeting_data_dir, storage_key).unlink(missing_ok=True)
-            raise
+    try:
+        record = await run_in_threadpool(ingest_meeting, database, settings.meeting_data_dir, parts, title, idempotency_key)
+    except IdempotencyConflict:
+        raise HTTPException(status_code=409, detail="Idempotency key belongs to different audio") from None
     return _accepted(record)
 
 
 @router.get("", response_model=MeetingListResponse)
-async def list_meetings(
+def list_meetings(
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
     offset: Annotated[int, Query(ge=0)] = 0,
@@ -189,7 +166,7 @@ async def list_meetings(
 
 
 @router.get("/search", response_model=MeetingSearchResponse)
-async def search_meetings(
+def search_meetings(
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
     q: Annotated[str, Query(min_length=1, max_length=200)],
     limit: Annotated[int, Query(ge=1, le=100)] = 20,
@@ -208,7 +185,7 @@ async def search_meetings(
 
 
 @router.get("/{meeting_id}", response_model=MeetingDetailResponse)
-async def get_meeting(
+def get_meeting(
     meeting_id: str,
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
 ) -> MeetingDetailResponse:
@@ -231,7 +208,7 @@ async def get_meeting(
 
 
 @router.get("/{meeting_id}/audio", response_class=FileResponse)
-async def get_meeting_audio(
+def get_meeting_audio(
     meeting_id: str,
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
@@ -241,7 +218,7 @@ async def get_meeting_audio(
 
 
 @router.get("/{meeting_id}/audio/{ordinal}", response_class=FileResponse)
-async def get_meeting_audio_part(
+def get_meeting_audio_part(
     meeting_id: str,
     ordinal: int,
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
@@ -269,7 +246,7 @@ def _audio_response(
 
 
 @router.delete("/{meeting_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_meeting(
+def delete_meeting(
     meeting_id: str,
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
@@ -285,7 +262,7 @@ async def delete_meeting(
 
 
 @router.post("/{meeting_id}/retry", response_model=MeetingAcceptedResponse, status_code=status.HTTP_202_ACCEPTED)
-async def retry_meeting(
+def retry_meeting(
     meeting_id: str,
     repository: Annotated[MeetingRepository, Depends(get_meeting_repository)],
 ) -> MeetingAcceptedResponse:

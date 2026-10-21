@@ -1,6 +1,7 @@
 """Local upload-to-search flow with real FFmpeg and fake inference models."""
 
 from __future__ import annotations
+from apps.api.tests.postgres_support import PostgresAsyncTestCase
 
 import io
 import tempfile
@@ -14,7 +15,7 @@ import httpx
 from app.api.deps import get_models
 from app.api.routes.meetings import get_meeting_settings
 from app.core.config import Settings
-from app.db.session import open_meeting_db
+from app.db.session import open_database
 from app.main import app
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 from app.services.audio.preprocess import SAMPLE_RATE
@@ -33,7 +34,7 @@ def _wav_bytes() -> bytes:
         return buffer.getvalue()
 
 
-class MeetingFlowTest(unittest.IsolatedAsyncioTestCase):
+class MeetingFlowTest(PostgresAsyncTestCase):
     async def test_upload_worker_search_audio_delete_and_legacy_response(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary) / "meetings"
@@ -60,7 +61,7 @@ class MeetingFlowTest(unittest.IsolatedAsyncioTestCase):
                     meeting_id = uploaded.json()["meeting_id"]
                     self.assertEqual((await client.get(f"/api/meetings/{meeting_id}")).json()["status"], "queued")
 
-                    connection = open_meeting_db(data_dir)
+                    connection = open_database(self.database)
                     try:
                         repository = MeetingRepository(connection)
                         result = AudioProcessResponse(

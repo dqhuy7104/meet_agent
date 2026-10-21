@@ -1,6 +1,7 @@
 """Plain-text transcript search contracts."""
 
 from __future__ import annotations
+from apps.api.tests.postgres_support import PostgresAsyncTestCase
 
 import tempfile
 import unittest
@@ -10,14 +11,15 @@ import httpx
 
 from app.api.routes.meetings import get_meeting_settings
 from app.core.config import Settings
-from app.db.session import open_meeting_db
+from app.db.session import open_database
 from app.main import app
 from app.schemas.transcript import AudioProcessResponse, TranscriptSegment
 from app.services.meetings.repository import MeetingRepository
 
 
-class MeetingSearchTest(unittest.IsolatedAsyncioTestCase):
+class MeetingSearchTest(PostgresAsyncTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.data_dir = Path(self.temporary.name) / "meetings"
@@ -42,7 +44,7 @@ class MeetingSearchTest(unittest.IsolatedAsyncioTestCase):
         return response.json()["meeting_id"]
 
     def _complete(self, meeting_id: str, texts: list[str]) -> None:
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             repository = MeetingRepository(connection)
             repository.claim_next()
@@ -73,15 +75,11 @@ class MeetingSearchTest(unittest.IsolatedAsyncioTestCase):
         self._complete(completed, ["Nội dung cuộc họp"])
         failed = await self._upload()
         queued = await self._upload()
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
             repository = MeetingRepository(connection)
             repository.claim_next()
             repository.fail(failed, "invalid_audio")
-            connection.execute(
-                """INSERT INTO transcript_fts(meeting_id, segment_id, text)
-                VALUES (?, 999, 'Nội dung không hợp lệ')""", (failed,)
-            )
             connection.commit()
         finally:
             connection.close()
@@ -113,9 +111,9 @@ class MeetingSearchTest(unittest.IsolatedAsyncioTestCase):
     async def test_delete_and_reprocessing_remove_stale_hits(self) -> None:
         meeting_id = await self._upload()
         self._complete(meeting_id, ["Nội dung cũ"])
-        connection = open_meeting_db(self.data_dir)
+        connection = open_database(self.database)
         try:
-            connection.execute("UPDATE meetings SET status='failed' WHERE id=?", (meeting_id,))
+            connection.execute("UPDATE meetings SET status='failed' WHERE id=%s", (meeting_id,))
             connection.commit()
         finally:
             connection.close()
