@@ -7,21 +7,21 @@ flowchart LR
   C --> F[pyannote diarization]
   E --> G[Region speaker alignment]
   F --> G
-  G --> H[(SQLite + private local audio)]
-  H --> O[Durable SQLite outbox]
+  G --> H[(PostgreSQL metadata + private local audio)]
+  H --> O[Transactional PostgreSQL outbox]
   O --> I[Separate RAG worker: chunk + embed]
-  I --> J[(PostgreSQL + pgvector derived index)]
+  I --> J[(Same PostgreSQL: pgvector derived index)]
   J --> K[Hybrid retrieval + deterministic rerank]
   K --> L[Evidence-only prompt + citation validation]
   L --> M[Local API / web: question + K + provider/model]
   H --> N[Transcript search / playback]
 ```
 
-The audio endpoint, local SQLite meeting library, React client, local Google
+The audio endpoint, PostgreSQL meeting library, React client, local Google
 Meet recording bot, and opt-in RAG path above are implemented. RAG uses a
 separate worker, immutable embedding profiles, transactional publication and
-SQLite checks before sending context and returning citations. PostgreSQL is
-derived storage; deleting a meeting remains local and queues eventual purge.
+authoritative meeting checks before sending context and returning citations. RAG tables are
+derived storage in the shared database; cancellation purges existing index rows and queues reconciliation.
 Citations validate source membership, not semantic entailment.
 
 Glossary cleanup, automatic summaries, word-level alignment, cloud object

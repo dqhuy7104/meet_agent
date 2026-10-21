@@ -2,9 +2,9 @@
 
 - **Purpose:** Meeting AI extracts speech and speaker information from meeting audio. The intended next stage is a retrieval-augmented generation (RAG) system for searching and answering questions about meeting content.
 - **Primary users:** Developers integrating the API now; people reviewing and querying meetings when the web and RAG flows are implemented.
-- **Implemented flow:** Audio upload → FastAPI `/api/audio/process` → FFmpeg decode to 16 kHz mono → Silero VAD → PhoWhisper ASR and pyannote diarization → transcript and timestamped speaker segments in the HTTP response. Models load on first use and are reused within an API process. No transcript is persisted by this flow.
-- **Planned flow:** Meeting ingestion → transcript cleanup and summarization → embedding and indexing → hybrid retrieval and reranking → grounded chat. `pipeline.md` sketches this direction; its storage, agent, and client stages are not implemented.
-- **Tech stack:** Python 3.10+, uv, FastAPI/Pydantic, FFmpeg, PyTorch, Silero VAD, Transformers/PhoWhisper, and pyannote.audio. `apps/web` is a TypeScript scaffold. There is no working database, queue, worker, or deployment stack yet.
+- **Implemented flow:** Audio upload → FastAPI `/api/audio/process` → FFmpeg decode to 16 kHz mono → Silero VAD → PhoWhisper ASR and pyannote diarization → transcript and timestamped speaker segments in the HTTP response. Models load on first use and are reused within an API process. The stateless endpoint persists nothing. Meeting routes persist metadata/transcripts in PostgreSQL with private audio on disk; the worker, local Meet bot, React client and opt-in pgvector RAG are implemented.
+- **Planned flow:** Voice identification, transcript cleanup and automatic summaries remain future work. `pipeline.md` describes the current shared PostgreSQL meeting/RAG flow.
+- **Tech stack:** Python 3.10+, uv, FastAPI/Pydantic, FFmpeg, PyTorch, Silero VAD, Transformers/PhoWhisper, and pyannote.audio. PostgreSQL 17/pgvector 0.8.1, psycopg, React/Vite and Docker Compose provide storage, jobs and local deployment.
 - **Definition of done:** Scope changes to the implemented or explicitly requested flow; verify affected behavior, document contract or model changes, protect meeting data and secrets, and preserve existing API behavior unless a migration is agreed.
 
 # 2. Repository Map
@@ -13,13 +13,13 @@
 .
 ├── apps/
 │   ├── api/
-│   │   ├── app/api/routes/   # Audio route; other route files are placeholders
+│   │   ├── app/api/routes/   # Audio, meeting, bot and chat HTTP routes
 │   │   ├── app/core/         # Model settings and lazy model registry
 │   │   ├── app/pipelines/    # Implemented audio processing orchestration
-│   │   ├── app/schemas/      # Audio response models; other schemas are placeholders
+│   │   ├── app/schemas/      # Explicit audio, meeting, bot and chat contracts
 │   │   ├── app/services/     # Audio decoder; planned indexing, retrieval, LLM services
 │   │   └── tests/            # Isolated audio API and model-registry tests
-│   └── web/                  # TypeScript client scaffold; no runnable app scripts
+│   └── web/                  # React/TypeScript/Vite meeting and chat client
 ├── ai_training/
 │   ├── datasets/            # Dataset notes and download scripts
 │   ├── evaluation/          # VIVOS, VietSuperSpeech, and ViYT-Diar evaluations
@@ -27,7 +27,7 @@
 │   ├── notebooks/           # Experiments
 │   └── results/             # Generated evaluation output; generally ignored
 ├── shared/python/           # Shared Python scaffolds, not active contracts yet
-├── infra/                   # Infrastructure scaffolds
+├── infra/                   # Local deployment configuration
 ├── scripts/                 # Development/training scaffolds and seed stub
 ├── pipeline.md              # Proposed end-to-end meeting/RAG pipeline
 ├── pyproject.toml           # Root Python dependencies; uv.lock pins them
@@ -50,9 +50,9 @@
 - `apps/web` owns presentation and API consumption when implemented. Keep model execution and provider secrets on the server.
 - `ai_training` owns dataset acquisition, experiments, and offline evaluation. Its scripts must not become request-time API dependencies by accident.
 - `shared/python` may hold genuinely shared code once there are concrete consumers; it is currently scaffold only. Keep dependencies from shared code toward apps out of the graph.
-- `infra` and root Docker/Compose files are placeholders. Add deployable configuration only with its runtime requirements documented; never embed credentials.
+- `infra` and root Docker/Compose files configure local PostgreSQL and application deployment. Add deployable configuration only with its runtime requirements documented; never embed credentials.
 
-The current API has no worker or persistence layer. If adding either for RAG, define ownership, contracts, retries, and idempotency explicitly rather than assuming they already exist.
+PostgreSQL owns meeting/bot state, the transactional outbox and derived RAG tables. All processes use DATABASE_URL and the same private data root. Run shared migrations explicitly; HTTP requests must not run DDL. TEST_DATABASE_URL is reserved for isolated random-schema integration tests. Keep single-host worker ownership and PID cancellation checks intact.
 
 # 5. Coding Conventions
 
@@ -85,12 +85,15 @@ The current API has no worker or persistence layer. If adding either for RAG, de
 | --- | --- |
 | Install Python dependencies | `uv sync` |
 | Start audio API | `PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 0.0.0.0 --port 8000` |
-| API tests (fake models, real FFmpeg decoding) | `PYTHONPATH=apps/api uv run python -m unittest discover -s apps/api/tests -p 'test_*.py'` |
+| API tests (fake models, real FFmpeg decoding; set TEST_DATABASE_URL for PostgreSQL coverage) | `PYTHONPATH=apps/api uv run python -m unittest discover -s apps/api/tests -p 'test_*.py'` |
 | Offline evaluation unit tests | `uv run python -m unittest discover -s ai_training/evaluation -p '*_unit.py'` |
 | VIVOS ASR evaluation | `uv run python ai_training/evaluation/test_vivos_silero_phowhisper.py --dataset-root <vivos-directory> --limit 5` |
 | VietSuperSpeech ASR evaluation | `uv run ai_training/evaluation/evaluate_vietsuperspeech_silero_phowhisper.py --dataset-root <dataset-directory> --limit 5` |
 | ViYT-Diar VAD/diarization evaluation | `uv run --env-file .env python ai_training/evaluation/test_viyt_vad_pyannote.py --dataset-root <dataset-directory> --limit 5` |
-| Format, lint, type check, web build, service build | No configured commands yet; `Makefile`, `apps/web/package.json`, Dockerfiles, and Compose are placeholders. |
+| Shared database migration | `PYTHONPATH=apps/api uv run --env-file .env python -m app.db.migrate` |
+| Local services | `docker compose up -d --build` |
+| Web checks | `npm run typecheck`, `npm test`, `npm run build` in `apps/web` |
+| Python formatter/linter/typecheck | Not configured. |
 
 Install FFmpeg separately for API audio processing. Real-model evaluations need datasets, model downloads, and (for remote pyannote) a Hugging Face token. Inspect manifests and scripts again before adding or changing commands; run the smallest relevant checks first.
 
@@ -153,4 +156,4 @@ More-specific instructions should supplement the root rules rather than contradi
 
 Meeting AI is a Python monorepo for extracting speech and speaker information from meeting audio. Its working FastAPI endpoint, `/api/audio/process`, validates an upload, decodes it with FFmpeg, finds speech with Silero VAD, routes each speech region by Silero Lang 95 to PhoWhisper or multilingual Whisper, and returns transcript segments with pyannote speaker turns. Models load lazily and are reused within each API process; this endpoint does not store audio or transcripts.
 
-`ai_training` contains dataset, training, and offline evaluation scripts for ASR and diarization. The web client, storage, workers, and meeting search/chat RAG stages remain scaffolds or proposals in `pipeline.md`. Keep changes within the implemented flow unless a new stage is explicitly requested, and use the tests and commands above to verify the affected behavior.
+`ai_training` contains dataset, training, and offline evaluation scripts for ASR and diarization. The web client, PostgreSQL storage, workers, Meet bot and opt-in meeting RAG are implemented; `pipeline.md` records the current flow. Voice identification remains future work. Keep changes within the implemented flow unless a new stage is explicitly requested, and use the tests and commands above to verify the affected behavior.
