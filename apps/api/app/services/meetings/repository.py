@@ -1,8 +1,12 @@
-"""SQLite operations for the local meeting library."""
+"""PostgreSQL operations for the local meeting library."""
 
 from __future__ import annotations
 
-import sqlite3
+from typing import Any
+
+import psycopg
+from psycopg.rows import dict_row
+from psycopg.pq import TransactionStatus
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
@@ -77,313 +81,207 @@ class SearchHit:
     text: str
 
 
-def _record(row: sqlite3.Row) -> MeetingRecord:
-    return MeetingRecord(**dict(row))
+def _record(row: dict[str, Any]) -> MeetingRecord:
+    values = dict(row)
+    for name in ("created_at", "updated_at", "cancelled_at"):
+        if values[name] is not None:
+            values[name] = values[name].isoformat()
+    return MeetingRecord(**values)
 
 
 class MeetingRepository:
-    """Own metadata and state transactions on one SQLite connection."""
+    """Own PostgreSQL meeting transactions without changing HTTP contracts."""
 
-    def __init__(self, connection: sqlite3.Connection) -> None:
+    def __init__(self, connection: psycopg.Connection) -> None:
         self.connection = connection
 
-    def create_meeting(
-        self,
-        meeting_id: str,
-        title: str | None,
-        filename: str,
-        storage_key: str,
-        checksum: str,
-        idempotency_key: str | None,
-        audio_files: list[tuple[str, str]] | None = None,
-        source: str = "upload",
-    ) -> MeetingRecord:
-        now = datetime.now(timezone.utc).isoformat()
+    def _execute(self, query: str, parameters: tuple = ()) -> psycopg.Cursor:
+        cursor = self.connection.cursor(row_factory=dict_row)
+        cursor.execute(query, parameters)
+        return cursor
+
+    def create_meeting(self, meeting_id: str, title: str | None, filename: str,
+                       storage_key: str, checksum: str, idempotency_key: str | None,
+                       audio_files: list[tuple[str, str]] | None = None,
+                       source: str = "upload") -> MeetingRecord:
+        now = datetime.now(timezone.utc)
         try:
-            with self.connection:
-                self.connection.execute(
-                    """INSERT INTO meetings
-                    (id, title, original_filename, storage_key, checksum, idempotency_key,
-                     created_at, updated_at, status, source)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?)""",
-                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now, source),
-                )
+            with self.connection.transaction():
+                self.connection.execute("""INSERT INTO meetings
+                    (id,title,original_filename,storage_key,checksum,idempotency_key,created_at,updated_at,status,source)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s)""",
+                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now, source))
                 for ordinal, (part_filename, part_key) in enumerate(audio_files or [(filename, storage_key)]):
-                    self.connection.execute(
-                        """INSERT INTO meeting_audio_files
-                           (meeting_id, ordinal, original_filename, storage_key) VALUES (?, ?, ?, ?)""",
-                        (meeting_id, ordinal, part_filename, part_key),
-                    )
-        except sqlite3.IntegrityError as error:
+                    self.connection.execute("""INSERT INTO meeting_audio_files
+                        (meeting_id,ordinal,original_filename,storage_key) VALUES (%s,%s,%s,%s)""",
+                        (meeting_id, ordinal, part_filename, part_key))
+        except psycopg.errors.UniqueViolation:
             if idempotency_key and self.find_by_idempotency_key(idempotency_key):
-                raise IdempotencyConflict(idempotency_key) from error
+                raise IdempotencyConflict(idempotency_key) from None
             raise
-        return self.get_meeting(meeting_id)  # type: ignore[return-value]
+        return self.get_meeting(meeting_id)
 
     def get_meeting(self, meeting_id: str) -> MeetingRecord | None:
-        row = self.connection.execute("SELECT * FROM meetings WHERE id = ?", (meeting_id,)).fetchone()
+        row = self._execute("SELECT * FROM meetings WHERE id=%s", (meeting_id,)).fetchone()
+        return _record(row) if row else None
+
+    def _locked_meeting(self, meeting_id: str) -> MeetingRecord | None:
+        row = self._execute("SELECT * FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
         return _record(row) if row else None
 
     def get_audio_files(self, meeting_id: str) -> list[MeetingAudioFile]:
-        rows = self.connection.execute(
-            """SELECT ordinal, original_filename, storage_key, duration_seconds, start_seconds
-               FROM meeting_audio_files WHERE meeting_id=? ORDER BY ordinal""", (meeting_id,),
-        ).fetchall()
-        return [MeetingAudioFile(**dict(row)) for row in rows]
+        return [MeetingAudioFile(**row) for row in self._execute("""SELECT ordinal,original_filename,
+            storage_key,duration_seconds,start_seconds FROM meeting_audio_files WHERE meeting_id=%s ORDER BY ordinal""",
+            (meeting_id,)).fetchall()]
 
     def find_by_idempotency_key(self, key: str) -> MeetingRecord | None:
-        row = self.connection.execute("SELECT * FROM meetings WHERE idempotency_key = ?", (key,)).fetchone()
+        row = self._execute("SELECT * FROM meetings WHERE idempotency_key=%s", (key,)).fetchone()
         return _record(row) if row else None
 
     def list_meetings(self, limit: int, offset: int) -> list[MeetingRecord]:
-        rows = self.connection.execute(
-            "SELECT * FROM meetings ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?", (limit, offset)
-        ).fetchall()
-        return [_record(row) for row in rows]
+        return [_record(row) for row in self._execute(
+            "SELECT * FROM meetings ORDER BY created_at DESC,id DESC LIMIT %s OFFSET %s", (limit, offset)).fetchall()]
 
     def claim_next(self) -> MeetingRecord | None:
-        """Claim the oldest queued meeting in one write transaction."""
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            row = self.connection.execute(
-                "SELECT id FROM meetings WHERE status='queued' ORDER BY created_at, id LIMIT 1"
-            ).fetchone()
+        with self.connection.transaction():
+            row = self._execute("""SELECT id FROM meetings WHERE status='queued'
+                ORDER BY created_at,id LIMIT 1 FOR UPDATE SKIP LOCKED""").fetchone()
             if row is None:
-                self.connection.commit()
                 return None
-            meeting_id = row["id"]
-            self.connection.execute(
-                """UPDATE meetings SET status='processing', attempt_count=attempt_count+1,
-                   updated_at=? WHERE id=?""",
-                (datetime.now(timezone.utc).isoformat(), meeting_id),
-            )
-            self.connection.commit()
-        except BaseException:
-            self.connection.rollback()
-            raise
-        return self.get_meeting(meeting_id)
+            self.connection.execute("""UPDATE meetings SET status='processing', attempt_count=attempt_count+1,
+                updated_at=now() WHERE id=%s""", (row['id'],))
+            return self.get_meeting(row['id'])
 
     def recover_interrupted(self) -> None:
-        """Recover only jobs interrupted before the two-claim limit."""
-        with self.connection:
-            self.connection.execute(
-                """UPDATE meetings SET status=CASE WHEN attempt_count<2 THEN 'queued' ELSE 'failed' END,
-                   failure_code=CASE WHEN attempt_count<2 THEN NULL ELSE 'interrupted' END,
-                   updated_at=? WHERE status='processing'""",
-                (datetime.now(timezone.utc).isoformat(),),
-            )
+        with self.connection.transaction():
+            self.connection.execute("""UPDATE meetings SET status=CASE WHEN attempt_count<2 THEN 'queued' ELSE 'failed' END,
+                failure_code=CASE WHEN attempt_count<2 THEN NULL ELSE 'interrupted' END,
+                updated_at=now() WHERE status='processing'""")
 
     def _clear_results(self, meeting_id: str) -> None:
-        self.connection.execute("DELETE FROM transcript_fts WHERE meeting_id=?", (meeting_id,))
-        for table in ("transcript_segments", "diarization_segments", "vad_segments"):
-            self.connection.execute(f"DELETE FROM {table} WHERE meeting_id=?", (meeting_id,))
+        for table in ("rag_publications", "rag_index_jobs", "transcript_segments", "diarization_segments", "vad_segments"):
+            self.connection.execute(f"DELETE FROM {table} WHERE meeting_id=%s", (meeting_id,))
 
     def complete(self, meeting_id: str, result: AudioProcessResponse, durations: list[float] | None = None) -> None:
-        """Replace all derived rows and publish completion atomically."""
-        with self.connection:
-            meeting = self.get_meeting(meeting_id)
-            if meeting is None or meeting.status != "processing":
+        with self.connection.transaction():
+            record = self._locked_meeting(meeting_id)
+            if record is None or record.status != 'processing':
                 return
             if durations is not None:
-                upload_offset = 0.0
+                offset = 0.0
                 for ordinal, duration in enumerate(durations):
-                    self.connection.execute(
-                        """UPDATE meeting_audio_files SET duration_seconds=?,
-                           start_seconds=COALESCE(start_seconds, ?) WHERE meeting_id=? AND ordinal=?""",
-                        (duration, upload_offset, meeting_id, ordinal),
-                    )
-                    upload_offset += duration
+                    self.connection.execute("""UPDATE meeting_audio_files SET duration_seconds=%s,
+                        start_seconds=COALESCE(start_seconds,%s) WHERE meeting_id=%s AND ordinal=%s""",
+                        (duration, offset, meeting_id, ordinal))
+                    offset += duration
             self._clear_results(meeting_id)
             for ordinal, segment in enumerate(result.vad_segments):
-                self.connection.execute(
-                    "INSERT INTO vad_segments VALUES (?, ?, ?, ?)",
-                    (meeting_id, ordinal, segment.start, segment.end),
-                )
+                self.connection.execute("INSERT INTO vad_segments VALUES (%s,%s,%s,%s)",
+                                        (meeting_id, ordinal, segment.start, segment.end))
             for ordinal, segment in enumerate(result.diarization_segments):
-                self.connection.execute(
-                    "INSERT INTO diarization_segments VALUES (?, ?, ?, ?, ?)",
-                    (meeting_id, ordinal, segment.start, segment.end, segment.speaker),
-                )
+                self.connection.execute("INSERT INTO diarization_segments VALUES (%s,%s,%s,%s,%s)",
+                                        (meeting_id, ordinal, segment.start, segment.end, segment.speaker))
             for ordinal, segment in enumerate(result.transcript_segments):
-                cursor = self.connection.execute(
-                    """INSERT INTO transcript_segments
-                    (meeting_id, ordinal, start_seconds, end_seconds, speaker, text)
-                    VALUES (?, ?, ?, ?, ?, ?)""",
-                    (meeting_id, ordinal, segment.start, segment.end, segment.speaker, segment.text),
-                )
-                self.connection.execute(
-                    "INSERT INTO transcript_fts (meeting_id, segment_id, text) VALUES (?, ?, ?)",
-                    (meeting_id, cursor.lastrowid, segment.text),
-                )
-            cursor = self.connection.execute(
-                """UPDATE meetings SET status='completed', duration_seconds=?, transcript=?,
-                   failure_code=NULL, updated_at=? WHERE id=? AND status='processing'""",
-                (result.duration_seconds, result.transcript, datetime.now(timezone.utc).isoformat(), meeting_id),
-            )
-            if cursor.rowcount != 1:
-                return
-
+                self.connection.execute("""INSERT INTO transcript_segments
+                    (meeting_id,ordinal,start_seconds,end_seconds,speaker,text) VALUES (%s,%s,%s,%s,%s,%s)""",
+                    (meeting_id, ordinal, segment.start, segment.end, segment.speaker, segment.text))
+            self.connection.execute("""UPDATE meetings SET status='completed',duration_seconds=%s,transcript=%s,
+                failure_code=NULL,updated_at=now() WHERE id=%s""", (result.duration_seconds, result.transcript, meeting_id))
             enqueue_rag_event(self.connection, meeting_id, "index")
 
     def fail(self, meeting_id: str, failure_code: str) -> None:
-        """Mark processing failure without exposing partial results."""
-        with self.connection:
-            meeting = self.get_meeting(meeting_id)
-            if meeting is None or meeting.status != "processing":
+        with self.connection.transaction():
+            record = self._locked_meeting(meeting_id)
+            if record is None or record.status != 'processing':
                 return
             self._clear_results(meeting_id)
+            self.connection.execute("""UPDATE meetings SET status='failed',failure_code=%s,duration_seconds=NULL,
+                transcript=NULL,updated_at=now() WHERE id=%s""", (failure_code, meeting_id))
             enqueue_rag_event(self.connection, meeting_id, "purge")
-            cursor = self.connection.execute(
-                """UPDATE meetings SET status='failed', failure_code=?, duration_seconds=NULL,
-                   transcript=NULL, updated_at=? WHERE id=? AND status='processing'""",
-                (failure_code, datetime.now(timezone.utc).isoformat(), meeting_id),
-            )
-            if cursor.rowcount != 1:
-                return
 
     def set_pipeline_process(self, meeting_id: str, pid: int, start_ticks: int) -> bool:
-        """Record the dedicated child process only while the job is running."""
-        with self.connection:
-            cursor = self.connection.execute(
-                """UPDATE meetings SET pipeline_pid=?, pipeline_start_ticks=?, updated_at=?
-                   WHERE id=? AND status='processing'""",
-                (pid, start_ticks, datetime.now(timezone.utc).isoformat(), meeting_id),
-            )
-        return cursor.rowcount == 1
+        return self.connection.execute("""UPDATE meetings SET pipeline_pid=%s,pipeline_start_ticks=%s,
+            updated_at=now() WHERE id=%s AND status='processing'""", (pid, start_ticks, meeting_id)).rowcount == 1
 
     def cancel(self, meeting_id: str) -> CancelledMeeting | None:
-        """Cancel one meeting while retaining only its audit metadata."""
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            meeting = self.get_meeting(meeting_id)
-            if meeting is None:
-                self.connection.commit()
+        with self.connection.transaction():
+            record = self._locked_meeting(meeting_id)
+            if record is None:
                 return None
-            cancelled = CancelledMeeting(
-                storage_key=meeting.storage_key,
-                pipeline_pid=meeting.pipeline_pid,
-                pipeline_start_ticks=meeting.pipeline_start_ticks,
-                other_storage_keys=tuple(
-                    part.storage_key for part in self.get_audio_files(meeting_id) if part.ordinal > 0
-                ),
-            )
-            if meeting.status != "cancelled":
+            cancelled = CancelledMeeting(record.storage_key, record.pipeline_pid, record.pipeline_start_ticks,
+                tuple(part.storage_key for part in self.get_audio_files(meeting_id) if part.ordinal > 0))
+            if record.status != 'cancelled':
                 self._clear_results(meeting_id)
+                self.connection.execute("DELETE FROM meeting_audio_files WHERE meeting_id=%s", (meeting_id,))
+                self.connection.execute("""UPDATE meetings SET status='cancelled',failure_code=NULL,duration_seconds=NULL,
+                    transcript=NULL,cancelled_at=now(),updated_at=now() WHERE id=%s""", (meeting_id,))
                 enqueue_rag_event(self.connection, meeting_id, "purge")
-                self.connection.execute("DELETE FROM meeting_audio_files WHERE meeting_id=?", (meeting_id,))
-                self.connection.execute(
-                    """UPDATE meetings SET status='cancelled', failure_code=NULL, duration_seconds=NULL,
-                       transcript=NULL, cancelled_at=?, updated_at=? WHERE id=?""",
-                    (datetime.now(timezone.utc).isoformat(), datetime.now(timezone.utc).isoformat(), meeting_id),
-                )
-            self.connection.commit()
             return cancelled
-        except BaseException:
-            self.connection.rollback()
-            raise
 
     def retry(self, meeting_id: str) -> MeetingRecord | None:
-        """Requeue one failed meeting while preserving its ID and audio."""
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            record = self.get_meeting(meeting_id)
+        with self.connection.transaction():
+            record = self._locked_meeting(meeting_id)
             if record is None:
-                self.connection.commit()
                 return None
-            if record.status != "failed":
+            if record.status != 'failed':
                 raise MeetingStateConflict(meeting_id)
+            self._clear_results(meeting_id)
+            self.connection.execute("""UPDATE meetings SET status='queued',attempt_count=0,failure_code=NULL,
+                transcript=NULL,duration_seconds=NULL,updated_at=now() WHERE id=%s""", (meeting_id,))
             enqueue_rag_event(self.connection, meeting_id, "purge")
-            cursor = self.connection.execute(
-                """UPDATE meetings SET status='queued', attempt_count=0, failure_code=NULL,
-                   transcript=NULL, duration_seconds=NULL, updated_at=? WHERE id=? AND status='failed'""",
-                (datetime.now(timezone.utc).isoformat(), meeting_id),
-            )
-            if cursor.rowcount != 1:
-                raise MeetingStateConflict(meeting_id)
-            self.connection.commit()
-        except BaseException:
-            self.connection.rollback()
-            raise
-        return self.get_meeting(meeting_id)
+            return self.get_meeting(meeting_id)
 
     def count_meetings(self) -> int:
         return self.connection.execute("SELECT count(*) FROM meetings").fetchone()[0]
 
+    def completed_meeting_ids(self) -> list[str]:
+        return [row[0] for row in self.connection.execute("SELECT id FROM meetings WHERE status='completed' ORDER BY id")]
+
+    def referenced_audio_keys(self) -> set[str]:
+        return {row[0] for row in self.connection.execute(
+            "SELECT storage_key FROM meeting_audio_files UNION SELECT storage_key FROM bot_session_parts")}
+
     def get_detail(self, meeting_id: str) -> MeetingDetail | None:
-        """Read completed results, keeping incomplete states transcript-free."""
-        meeting = self.get_meeting(meeting_id)
-        if meeting is None:
+        if self.connection.info.transaction_status == TransactionStatus.IDLE:
+            with self.connection.transaction():
+                self.connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                return self._detail(meeting_id)
+        return self._detail(meeting_id)
+
+    def _detail(self, meeting_id: str) -> MeetingDetail | None:
+        record = self.get_meeting(meeting_id)
+        if record is None:
             return None
-        if meeting.status != "completed":
-            return MeetingDetail(meeting, [], [], [], self.get_audio_files(meeting_id))
-        vad = [
-            SpeechSegment(start=row["start_seconds"], end=row["end_seconds"])
-            for row in self.connection.execute(
-                "SELECT start_seconds, end_seconds FROM vad_segments WHERE meeting_id=? ORDER BY ordinal",
-                (meeting_id,),
-            )
-        ]
-        turns = [
-            SpeakerTurn(start=row["start_seconds"], end=row["end_seconds"], speaker=row["speaker"])
-            for row in self.connection.execute(
-                """SELECT start_seconds, end_seconds, speaker FROM diarization_segments
-                   WHERE meeting_id=? ORDER BY ordinal""",
-                (meeting_id,),
-            )
-        ]
-        transcripts = [
-            TranscriptSegment(
-                start=row["start_seconds"], end=row["end_seconds"],
-                speaker=row["speaker"], text=row["text"],
-            )
-            for row in self.connection.execute(
-                """SELECT start_seconds, end_seconds, speaker, text FROM transcript_segments
-                   WHERE meeting_id=? ORDER BY ordinal""",
-                (meeting_id,),
-            )
-        ]
-        return MeetingDetail(meeting, vad, turns, transcripts, self.get_audio_files(meeting_id))
+        parts = self.get_audio_files(meeting_id)
+        if record.status != 'completed':
+            return MeetingDetail(record, [], [], [], parts)
+        vad = [SpeechSegment(**row) for row in self._execute(
+            "SELECT start_seconds AS start,end_seconds AS end FROM vad_segments WHERE meeting_id=%s ORDER BY ordinal", (meeting_id,))]
+        turns = [SpeakerTurn(**row) for row in self._execute("""SELECT start_seconds AS start,end_seconds AS end,speaker
+            FROM diarization_segments WHERE meeting_id=%s ORDER BY ordinal""", (meeting_id,))]
+        transcripts = [TranscriptSegment(**row) for row in self._execute("""SELECT start_seconds AS start,end_seconds AS end,speaker,text
+            FROM transcript_segments WHERE meeting_id=%s ORDER BY ordinal""", (meeting_id,))]
+        return MeetingDetail(record, vad, turns, transcripts, parts)
 
     def delete(self, meeting_id: str) -> str | None:
-        """Remove database rows atomically and return the audio storage key."""
-        self.connection.execute("BEGIN IMMEDIATE")
-        try:
-            meeting = self.get_meeting(meeting_id)
-            if meeting is None:
-                self.connection.commit()
+        with self.connection.transaction():
+            record = self._locked_meeting(meeting_id)
+            if record is None:
                 return None
-            if meeting.status == "processing":
+            if record.status == 'processing':
                 raise MeetingStateConflict(meeting_id)
+            self.connection.execute("DELETE FROM meetings WHERE id=%s", (meeting_id,))
             enqueue_rag_event(self.connection, meeting_id, "purge")
-            self._clear_results(meeting_id)
-            self.connection.execute("DELETE FROM meetings WHERE id=?", (meeting_id,))
-            self.connection.commit()
-            return meeting.storage_key
-        except BaseException:
-            self.connection.rollback()
-            raise
+            return record.storage_key
 
     def search_segments(self, query: str, limit: int, offset: int) -> tuple[list[SearchHit], int]:
-        """Search completed transcript segments using escaped plain text terms."""
-        terms = query.split()
-        expression = " AND ".join('"' + term.replace('"', '""') + '"' for term in terms)
-        if not expression:
-            return [], 0
-        joined = """FROM transcript_fts
-            JOIN transcript_segments AS segment ON segment.id = CAST(transcript_fts.segment_id AS INTEGER)
-            JOIN meetings AS meeting ON meeting.id = segment.meeting_id
-            WHERE transcript_fts MATCH ? AND meeting.status='completed'"""
-        total = self.connection.execute("SELECT count(*) " + joined, (expression,)).fetchone()[0]
-        rows = self.connection.execute(
-            """SELECT meeting.id AS meeting_id, meeting.title, segment.speaker,
-               segment.start_seconds, segment.end_seconds, segment.text """ + joined +
-            " ORDER BY meeting.created_at DESC, meeting.id DESC, segment.start_seconds, segment.id LIMIT ? OFFSET ?",
-            (expression, limit, offset),
-        ).fetchall()
-        return [
-            SearchHit(
-                meeting_id=row["meeting_id"], title=row["title"], speaker=row["speaker"],
-                start=row["start_seconds"], end=row["end_seconds"], text=row["text"],
-            )
-            for row in rows
-        ], total
+        joined = """FROM transcript_segments AS segment JOIN meetings AS meeting ON meeting.id=segment.meeting_id
+            WHERE segment.document @@ plainto_tsquery('simple',%s) AND meeting.status='completed'"""
+        with self.connection.transaction():
+            self.connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
+            total = self.connection.execute("SELECT count(*) " + joined, (query,)).fetchone()[0]
+            rows = self._execute("""SELECT meeting.id AS meeting_id,meeting.title,segment.speaker,
+                segment.start_seconds AS start,segment.end_seconds AS end,segment.text """ + joined +
+                " ORDER BY meeting.created_at DESC,meeting.id DESC,segment.start_seconds,segment.id LIMIT %s OFFSET %s",
+                (query, limit, offset)).fetchall()
+            return [SearchHit(**row) for row in rows], total
