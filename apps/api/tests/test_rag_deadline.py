@@ -28,11 +28,11 @@ class DeadlineTest(unittest.IsolatedAsyncioTestCase):
         finally:release.set()
 
     async def test_deadline_also_bounds_authoritative_source_reads(self):
-        from apps.api.tests.postgres_support import isolated_postgres
+        from apps.api.tests.postgres_support import enter_postgres
         from app.services.meetings.repository import MeetingRepository
         from test_rag_outbox import complete_meeting
         release = threading.Event()
-        fixture = self.enterContext(isolated_postgres())
+        fixture = enter_postgres(self)
         complete_meeting(MeetingRepository(fixture.connection))
         env = environment()
         env['DATABASE_URL'] = fixture.database.database_url.get_secret_value()

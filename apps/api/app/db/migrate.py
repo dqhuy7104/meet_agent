@@ -3,6 +3,7 @@ import hashlib
 from pathlib import Path
 
 import psycopg
+from psycopg import sql
 
 from app.core.database_config import DatabaseUnavailableError, get_database_settings
 from app.db.session import open_database
@@ -18,16 +19,20 @@ def migration_definitions() -> list[tuple[int, str, str]]:
 def migrate_database(connection: psycopg.Connection) -> None:
     with connection.transaction():
         connection.execute("SELECT pg_advisory_xact_lock(%s,%s)", MIGRATION_LOCK)
-        ledger = connection.execute("SELECT to_regclass('schema_migrations')").fetchone()[0]
-        if ledger is None:
+        schema = connection.execute('SELECT current_schema()').fetchone()[0]
+        if schema is None:
+            raise DatabaseUnavailableError('database_schema_missing')
+        ledger_table = sql.Identifier(schema, 'schema_migrations')
+        has_ledger = connection.execute("SELECT EXISTS(SELECT 1 FROM pg_tables WHERE schemaname=%s AND tablename='schema_migrations')", (schema,)).fetchone()[0]
+        if not has_ledger:
             existing = connection.execute("""SELECT tablename FROM pg_tables WHERE schemaname=current_schema()
                 AND (tablename IN ('meetings','bot_sessions','storage_identity') OR tablename LIKE 'rag_%%')""").fetchall()
             if existing:
                 raise DatabaseUnavailableError("unversioned_database")
-            connection.execute("""CREATE TABLE schema_migrations (
+            connection.execute(sql.SQL("""CREATE TABLE {} (
                 version integer PRIMARY KEY, checksum text NOT NULL,
-                applied_at timestamptz NOT NULL DEFAULT now())""")
-        applied = dict(connection.execute("SELECT version,checksum FROM schema_migrations").fetchall())
+                applied_at timestamptz NOT NULL DEFAULT now())""").format(ledger_table))
+        applied = dict(connection.execute(sql.SQL("SELECT version,checksum FROM {}").format(ledger_table)).fetchall())
         definitions = migration_definitions()
         expected = {version: checksum for version, checksum, _ in definitions}
         if any(expected.get(version) != checksum for version, checksum in applied.items()):
@@ -35,7 +40,7 @@ def migrate_database(connection: psycopg.Connection) -> None:
         for version, checksum, content in definitions:
             if version not in applied:
                 connection.execute(content)
-                connection.execute("INSERT INTO schema_migrations(version,checksum) VALUES (%s,%s)", (version, checksum))
+                connection.execute(sql.SQL("INSERT INTO {}(version,checksum) VALUES (%s,%s)").format(ledger_table), (version, checksum))
 
 
 def main() -> None:

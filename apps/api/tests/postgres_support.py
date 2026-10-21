@@ -1,5 +1,5 @@
 """Owned PostgreSQL schemas; TEST_DATABASE_URL never falls back to application data."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 import os
 from pathlib import Path
@@ -53,9 +53,15 @@ def isolated_postgres(*, migrate: bool = True) -> Iterator[PostgresFixture]:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 
 
+def enter_postgres(test_case: unittest.TestCase) -> PostgresFixture:
+    stack = ExitStack()
+    test_case.addCleanup(stack.close)
+    return stack.enter_context(isolated_postgres())
+
+
 class PostgresTestCase(unittest.TestCase):
     def setUp(self) -> None:
-        fixture = self.enterContext(isolated_postgres())
+        fixture = enter_postgres(self)
         self.database, self.connection = fixture.database, fixture.connection
         self.data_dir, self.schema = fixture.data_dir, fixture.schema
 
@@ -65,7 +71,7 @@ class PostgresTestCase(unittest.TestCase):
 
 class PostgresAsyncTestCase(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
-        fixture = self.enterContext(isolated_postgres())
+        fixture = enter_postgres(self)
         self.database, self.connection = fixture.database, fixture.connection
         self.data_dir, self.schema = fixture.data_dir, fixture.schema
         from app.api.routes.meetings import get_meeting_database_settings

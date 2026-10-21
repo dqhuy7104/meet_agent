@@ -106,3 +106,12 @@ def cleanup_orphaned_audio(data_dir: Path, repository: MeetingRepository) -> Non
         for audio in (data_dir / 'audio').iterdir():
             if audio.name not in referenced and (audio.is_file() or audio.is_symlink()):
                 audio.unlink(missing_ok=True)
+
+
+def cleanup_bot_temporary_audio(data_dir: Path, connection: psycopg.Connection) -> None:
+    """Remove abandoned captures only while the caller owns the bot runner lock."""
+    with audio_publication_lock(data_dir):
+        _validate_storage_identity(data_dir, connection)
+        for temporary in (data_dir / 'bot-tmp').iterdir():
+            if temporary.is_file() or temporary.is_symlink():
+                temporary.unlink(missing_ok=True)

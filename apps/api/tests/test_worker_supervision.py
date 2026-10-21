@@ -59,3 +59,35 @@ class WorkerSupervisionTest(PostgresTestCase):
         self.assertIsNone(process_start_ticks(pid))
         with worker_lease(self.database, 'meeting') as new_owner:
             new_owner.ensure_owned()
+
+
+def completion_connection_failure(meeting_id, data_dir, settings, database, start_event, ownership_event):
+    from app.services.meetings import worker
+    real_connect = worker.open_database
+    connections = []
+    def connect(*args, **kwargs):
+        connection = real_connect(*args, **kwargs)
+        connections.append(connection)
+        return connection
+    def inference(*args, **kwargs):
+        with real_connect(database) as admin:
+            admin.execute('SELECT pg_terminate_backend(%s)', (connections[0].info.backend_pid,))
+        return result(), [2.0]
+    with patch.object(worker, 'open_database', side_effect=connect), patch.object(worker, 'process_meeting_parts', side_effect=inference):
+        worker.run_claimed_meeting(meeting_id, data_dir, settings, database, start_event, ownership_event)
+
+
+class ChildConnectionFailureTest(PostgresTestCase):
+    def test_failed_child_connection_does_not_strand_processing(self):
+        initialize_meeting_storage(self.data_dir, self.connection)
+        repository = MeetingRepository(self.connection)
+        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+        context = multiprocessing.get_context('spawn')
+        make_process = context.Process
+        def process(**kwargs):
+            kwargs['target'] = completion_connection_failure
+            return make_process(**kwargs)
+        with worker_lease(self.database, 'meeting') as lease, patch.object(context, 'Process', process):
+            run_once(repository, self.data_dir, Settings(), self.database, lease)
+        self.assertEqual(repository.get_meeting('m').status, 'failed')
+        self.assertEqual(repository.retry('m').status, 'queued')

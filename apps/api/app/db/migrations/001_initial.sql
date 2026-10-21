@@ -15,7 +15,7 @@ CREATE TABLE meetings (
     failure_code TEXT,
     transcript TEXT,
     pipeline_pid INTEGER,
-    pipeline_start_ticks INTEGER,
+    pipeline_start_ticks bigint,
     cancelled_at timestamptz,
     source TEXT NOT NULL DEFAULT 'upload'
 );

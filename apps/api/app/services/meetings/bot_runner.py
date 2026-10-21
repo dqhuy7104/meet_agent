@@ -15,8 +15,12 @@ from app.db.worker_locks import worker_lease
 import psycopg
 from app.services.meetings.bot_capture import CaptureUnavailable, PulseWavRecorder, RecordedPart, check_bot_runtime
 from app.services.meetings.bot_repository import BotSessionRepository, BotStateConflict
+from app.services.meetings.repository import MeetingRepository
 from app.services.meetings.meet_browser import ChromeMeetBrowser, JoinFailed
-from app.services.meetings.storage import audio_path, audio_publication_lock, cleanup_orphaned_audio, publish_audio_file, initialize_meeting_storage
+from app.services.meetings.storage import (
+    audio_path, audio_publication_lock, cleanup_orphaned_audio, cleanup_bot_temporary_audio,
+    publish_audio_file, initialize_meeting_storage,
+)
 
 @contextmanager
 def exclusive_bot_lock(data_dir: Path) -> Iterator[None]:
@@ -170,6 +174,7 @@ async def _run_loop(settings: Settings) -> None:
                     repository = BotSessionRepository(connection, data_dir)
                     await asyncio.to_thread(repository.recover_stale)
                     await asyncio.to_thread(cleanup_orphaned_audio, data_dir, MeetingRepository(connection))
+                    await asyncio.to_thread(cleanup_bot_temporary_audio, data_dir, connection)
                     while True:
                         await asyncio.to_thread(lease.ensure_owned)
                         session = await asyncio.to_thread(repository.claim_next)

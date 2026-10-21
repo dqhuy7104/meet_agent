@@ -77,6 +77,7 @@ def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, dat
                 repository.complete(meeting.id, result, durations)
         except psycopg.Error:
             logger.warning("Meeting database unavailable")
+            raise SystemExit(1) from None
         except AudioTooLongError:
             repository.fail(meeting.id, "audio_too_long")
             logger.warning("Meeting %s failed: audio_too_long", meeting.id)

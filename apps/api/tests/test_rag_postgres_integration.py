@@ -7,13 +7,13 @@ from dataclasses import replace
 
 class PostgresTest(unittest.TestCase):
     def setUp(self):
-        from apps.api.tests.postgres_support import isolated_postgres
+        from apps.api.tests.postgres_support import enter_postgres
         from app.services.rag.repository import RagRepository
         from app.core.rag_config import EmbeddingProfile
         from app.services.rag.chunking import make_snapshot, chunk_transcript
         from app.services.rag.types import SourceSegment
         from apps.api.tests.postgres_support import seed_snapshot
-        fixture = self.enterContext(isolated_postgres())
+        fixture = enter_postgres(self)
         self.database, self.connection = fixture.database, fixture.connection
         self.data_dir, self.schema = fixture.data_dir, fixture.schema
         self.seed = lambda snapshot: seed_snapshot(self.connection, snapshot)
