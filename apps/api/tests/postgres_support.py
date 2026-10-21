@@ -7,6 +7,7 @@ import tempfile
 from typing import Iterator
 import unittest
 import uuid
+from unittest.mock import patch
 
 import psycopg
 from psycopg import sql
@@ -40,8 +41,14 @@ def isolated_postgres(*, migrate: bool = True) -> Iterator[PostgresFixture]:
                     if migrate:
                         from app.db.migrate import migrate_database
                         migrate_database(connection)
-                    yield PostgresFixture(DatabaseSettings(SecretStr(scoped)), connection,
-                                          Path(temporary) / "data", schema)
+                    from app.core.database_config import get_database_settings
+                    get_database_settings.cache_clear()
+                    try:
+                        with patch.dict(os.environ, {"DATABASE_URL": scoped}):
+                            yield PostgresFixture(DatabaseSettings(SecretStr(scoped)), connection,
+                                                  Path(temporary) / "data", schema)
+                    finally:
+                        get_database_settings.cache_clear()
         finally:
             admin.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
 

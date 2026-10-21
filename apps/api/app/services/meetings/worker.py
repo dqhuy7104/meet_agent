@@ -16,7 +16,9 @@ from typing import Iterator
 from app.core.audio_models import ModelLoadError, ModelRegistry
 from app.core.config import Settings, get_settings
 from app.db.session import open_database, validate_database
-from app.core.database_config import get_database_settings
+from app.core.database_config import DatabaseSettings, DatabaseUnavailableError, get_database_settings
+from app.db.worker_locks import WorkerLease, worker_lease
+import psycopg
 from app.services.meetings.storage import initialize_meeting_storage
 from app.pipelines.meeting_pipeline import process_audio
 from app.services.audio.preprocess import AudioTooLongError, InvalidAudioError
@@ -59,10 +61,10 @@ def exclusive_worker_lock(data_dir: Path) -> Iterator[None]:
         os.close(descriptor)
 
 
-def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, start_event: Event) -> None:
+def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, database: DatabaseSettings, start_event: Event, ownership_event: Event) -> None:
     """Process a claimed meeting in an interruptible child process."""
     start_event.wait()
-    connection = open_meeting_db(data_dir)
+    connection = open_database(database)
     try:
         repository = MeetingRepository(connection)
         meeting = repository.get_meeting(meeting_id)
@@ -71,7 +73,10 @@ def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, sta
         try:
             parts = repository.get_audio_files(meeting_id)
             result, durations = process_meeting_parts(parts, data_dir, ModelRegistry(settings), meeting.source)
-            repository.complete(meeting.id, result, durations)
+            if ownership_event.is_set():
+                repository.complete(meeting.id, result, durations)
+        except psycopg.Error:
+            logger.warning("Meeting database unavailable")
         except AudioTooLongError:
             repository.fail(meeting.id, "audio_too_long")
             logger.warning("Meeting %s failed: audio_too_long", meeting.id)
@@ -136,44 +141,61 @@ def process_meeting_parts(
     ), durations
 
 
-def run_once(repository: MeetingRepository, data_dir: Path, settings: Settings) -> bool:
-    """Claim and supervise one interruptible meeting job."""
+def run_once(repository: MeetingRepository, data_dir: Path, settings: Settings,
+             database: DatabaseSettings, lease: WorkerLease) -> bool:
+    """Supervise one spawned child without inheriting PostgreSQL connections."""
+    lease.ensure_owned()
     meeting = repository.claim_next()
     if meeting is None:
         return False
-    context = multiprocessing.get_context("fork")
-    start_event = context.Event()
-    process = context.Process(
-        target=run_claimed_meeting, args=(meeting.id, data_dir, settings, start_event), daemon=True
-    )
+    context = multiprocessing.get_context("spawn")
+    start_event, ownership_event = context.Event(), context.Event()
+    ownership_event.set()
+    process = context.Process(target=run_claimed_meeting,
+        args=(meeting.id, data_dir, settings, database, start_event, ownership_event), daemon=True)
     process.start()
-    start_ticks = process_start_ticks(process.pid)
-    if start_ticks is None or not repository.set_pipeline_process(meeting.id, process.pid, start_ticks):
-        process.kill()
-    else:
+    try:
+        start_ticks = process_start_ticks(process.pid)
+        if start_ticks is None or not repository.set_pipeline_process(meeting.id, process.pid, start_ticks):
+            return True
         start_event.set()
-    process.join()
-    return True
+        while process.is_alive():
+            process.join(timeout=0.2)
+            lease.ensure_owned()
+        if process.exitcode != 0:
+            repository.fail(meeting.id, 'processing_error')
+        return True
+    finally:
+        ownership_event.clear()
+        if process.is_alive():
+            process.kill()
+        process.join()
 
 
 def main() -> None:
-    """Run one reusable model registry until interrupted."""
-    settings = get_settings()
+    settings, database = get_settings(), get_database_settings()
     data_dir = settings.meeting_data_dir
-    initialize_meeting_store(data_dir)
+    with open_database(database) as connection:
+        validate_database(connection)
+        initialize_meeting_storage(data_dir, connection)
     with exclusive_worker_lock(data_dir):
-        cleanup_orphaned_audio(data_dir)
-        connection = open_meeting_db(data_dir)
         try:
-            repository = MeetingRepository(connection)
-            repository.recover_interrupted()
             while True:
-                if not run_once(repository, data_dir, settings):
+                try:
+                    with worker_lease(database, 'meeting') as lease, open_database(database) as connection:
+                        repository = MeetingRepository(connection)
+                        repository.recover_interrupted()
+                        cleanup_orphaned_audio(data_dir, repository)
+                        while True:
+                            if not run_once(repository, data_dir, settings, database, lease):
+                                time.sleep(1)
+                except (psycopg.OperationalError, DatabaseUnavailableError) as error:
+                    if getattr(error, 'code', '') not in ('', 'worker_ownership_lost'):
+                        raise
+                    logger.warning('Meeting worker database unavailable; reconnecting')
                     time.sleep(1)
         except KeyboardInterrupt:
             return
-        finally:
-            connection.close()
 
 
 if __name__ == "__main__":

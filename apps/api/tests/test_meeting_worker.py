@@ -15,13 +15,16 @@ import httpx
 from app.api.routes.meetings import get_meeting_settings
 from app.core.audio_models import ModelLoadError
 from app.core.config import Settings
-from app.db.session import initialize_meeting_store, open_meeting_db
+from app.db.session import open_database
+from app.services.meetings.storage import initialize_meeting_storage
+from apps.api.tests.postgres_support import PostgresTestCase, PostgresAsyncTestCase
 from app.main import app
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 from app.services.audio.preprocess import AudioTooLongError, InvalidAudioError
 from app.services.meetings.repository import MeetingRepository, MeetingStateConflict
 from app.services.meetings.storage import publish_audio
-from app.services.meetings.worker import exclusive_worker_lock, process_start_ticks, run_once, terminate_process
+from app.services.meetings.worker import exclusive_worker_lock, process_start_ticks, terminate_process
+from apps.api.tests.worker_support import run_once_inline as run_once
 
 
 def _result(text: str = "Xin chào") -> AudioProcessResponse:
@@ -33,13 +36,14 @@ def _result(text: str = "Xin chào") -> AudioProcessResponse:
     )
 
 
-class MeetingWorkerTest(unittest.TestCase):
+class MeetingWorkerTest(PostgresTestCase):
     def setUp(self) -> None:
+        super().setUp()
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.data_dir = Path(self.temporary.name) / "meetings"
-        initialize_meeting_store(self.data_dir)
-        self.connection = open_meeting_db(self.data_dir)
+        initialize_meeting_storage(self.data_dir, self.connection)
+        self.connection = open_database(self.database)
         self.addCleanup(self.connection.close)
         self.repository = MeetingRepository(self.connection)
         self.settings = Settings(meeting_data_dir=self.data_dir)
@@ -53,7 +57,7 @@ class MeetingWorkerTest(unittest.TestCase):
         )
 
     def test_claim_is_transactional_across_connections(self) -> None:
-        second = open_meeting_db(self.data_dir)
+        second = open_database(self.database)
         self.addCleanup(second.close)
         first_claim = self.repository.claim_next()
         self.assertEqual(first_claim.id, "m1")
@@ -91,7 +95,7 @@ class MeetingWorkerTest(unittest.TestCase):
 
     def test_worker_completes_all_result_rows(self) -> None:
         with patch("app.services.meetings.worker.process_audio", return_value=_result()):
-            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
         record = self.repository.get_meeting("m1")
         self.assertEqual(record.status, "completed")
         self.assertEqual(record.duration_seconds, 1.0)
@@ -99,9 +103,9 @@ class MeetingWorkerTest(unittest.TestCase):
         self.assertEqual(self.connection.execute("SELECT count(*) FROM vad_segments").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM diarization_segments").fetchone()[0], 1)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 1)
-        self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_fts").fetchone()[0], 1)
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 1)
         self.assertIsNone(self.repository.claim_next())
-        self.assertFalse(run_once(self.repository, self.data_dir, self.settings))
+        self.assertFalse(run_once(self.repository, self.data_dir, self.settings, self.database))
 
     def test_worker_combines_ordered_audio_files_on_one_timeline(self) -> None:
         first = publish_audio(self.data_dir, b"first")
@@ -112,7 +116,7 @@ class MeetingWorkerTest(unittest.TestCase):
         )
         self.repository.cancel("m1")
         with patch("app.services.meetings.worker.process_audio", side_effect=lambda data, name, models: _result(name)):
-            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
         detail = self.repository.get_detail("multi")
         self.assertEqual(detail.meeting.status, "completed")
         self.assertEqual(detail.meeting.duration_seconds, 2.0)
@@ -131,7 +135,7 @@ class MeetingWorkerTest(unittest.TestCase):
         with patch("app.services.meetings.worker.process_audio", return_value=_result().model_copy(
             update={"duration_seconds": 1000.0}
         )):
-            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
         detail = self.repository.get_detail("multi")
         self.assertEqual(detail.meeting.status, "failed")
         self.assertEqual(detail.meeting.failure_code, "audio_too_long")
@@ -152,7 +156,7 @@ class MeetingWorkerTest(unittest.TestCase):
         with patch("app.services.meetings.worker.process_audio", return_value=_result().model_copy(
             update={"duration_seconds": 1000.0}
         )):
-            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
         detail = self.repository.get_detail("bot")
         self.assertEqual(detail.meeting.source, "google_meet_bot")
         self.assertEqual(detail.meeting.duration_seconds, 2200.0)
@@ -174,7 +178,7 @@ class MeetingWorkerTest(unittest.TestCase):
                 self.connection.execute("UPDATE meetings SET status='queued', attempt_count=0, failure_code=NULL")
                 self.connection.commit()
                 with patch("app.services.meetings.worker.process_audio", side_effect=error):
-                    self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+                    self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
                 record = self.repository.get_meeting("m1")
                 self.assertEqual(record.status, "failed")
                 self.assertEqual(record.failure_code, code)
@@ -193,9 +197,9 @@ class MeetingWorkerTest(unittest.TestCase):
         self.assertEqual(retry.attempt_count, 0)
         self.assertIsNone(retry.failure_code)
         with patch("app.services.meetings.worker.process_audio", return_value=_result("New words")):
-            self.assertTrue(run_once(self.repository, self.data_dir, self.settings))
+            self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
         texts = [row[0] for row in self.connection.execute("SELECT text FROM transcript_segments")]
-        indexed = [row[0] for row in self.connection.execute("SELECT text FROM transcript_fts")]
+        indexed = [row[0] for row in self.connection.execute("SELECT text FROM transcript_segments")]
         self.assertEqual(texts, ["New words"])
         self.assertEqual(indexed, ["New words"])
         with self.assertRaises(MeetingStateConflict):
@@ -211,10 +215,10 @@ class MeetingWorkerTest(unittest.TestCase):
         outcomes: list[str] = []
 
         def first_retry() -> None:
-            connection = open_meeting_db(self.data_dir)
+            connection = open_database(self.database)
             try:
                 repository = MeetingRepository(connection)
-                original_get = repository.get_meeting
+                original_get = repository._locked_meeting
 
                 def paused_get(meeting_id: str):
                     record = original_get(meeting_id)
@@ -222,13 +226,13 @@ class MeetingWorkerTest(unittest.TestCase):
                     release_first.wait(2)
                     return record
 
-                with patch.object(repository, "get_meeting", paused_get):
+                with patch.object(repository, "_locked_meeting", paused_get):
                     repository.retry("m1")
             finally:
                 connection.close()
 
         def second_retry_and_claim() -> None:
-            connection = open_meeting_db(self.data_dir)
+            connection = open_database(self.database)
             try:
                 repository = MeetingRepository(connection)
                 try:
@@ -256,12 +260,12 @@ class MeetingWorkerTest(unittest.TestCase):
         self.assertEqual(outcomes, ["conflict"])
 
 
-class RetryRouteTest(unittest.IsolatedAsyncioTestCase):
+class RetryRouteTest(PostgresAsyncTestCase):
     async def test_retry_route_returns_404_409_or_queued(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary) / "meetings"
-            initialize_meeting_store(data_dir)
-            connection = open_meeting_db(data_dir)
+            initialize_meeting_storage(data_dir, self.connection)
+            connection = open_database(self.database)
             repository = MeetingRepository(connection)
             key = publish_audio(data_dir, b"audio")
             repository.create_meeting("m1", None, "meeting.wav", key, "checksum", None)

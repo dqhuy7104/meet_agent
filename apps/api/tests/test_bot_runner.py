@@ -10,7 +10,9 @@ from pathlib import Path
 from unittest.mock import patch
 
 from app.core.config import Settings
-from app.db.session import initialize_meeting_store, open_meeting_db
+from app.db.session import open_database
+from app.services.meetings.storage import initialize_meeting_storage
+from apps.api.tests.postgres_support import PostgresTestCase, PostgresAsyncTestCase
 from app.services.meetings.bot_capture import RecordedPart
 from app.services.meetings.bot_repository import BotSessionRepository
 from app.services.meetings.bot_runner import exclusive_bot_lock, run_session
@@ -59,15 +61,15 @@ class FakeRecorder:
         return RecordedPart(1.0, started, time.monotonic())
 
 
-class BotRunnerTest(unittest.IsolatedAsyncioTestCase):
+class BotRunnerTest(PostgresAsyncTestCase):
     async def asyncSetUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.data_dir = Path(self.temporary.name) / "data"
-        initialize_meeting_store(self.data_dir)
-        self.connection = open_meeting_db(self.data_dir)
+        initialize_meeting_storage(self.data_dir, self.connection)
+        self.connection = open_database(self.database)
         self.addCleanup(self.connection.close)
-        self.repository = BotSessionRepository(self.connection)
+        self.repository = BotSessionRepository(self.connection, self.data_dir)
         self.settings = Settings(meeting_data_dir=self.data_dir, bot_audio_sink="meet_bot")
         self.session = self.repository.create("https://meet.google.com/abc-defg-hij", None, None)
         self.repository.claim_next()

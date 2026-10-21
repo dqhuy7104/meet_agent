@@ -20,7 +20,7 @@ from app.main import app
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 from app.services.audio.preprocess import SAMPLE_RATE
 from app.services.meetings.repository import MeetingRepository
-from app.services.meetings.worker import run_once
+from apps.api.tests.worker_support import run_once_inline as run_once
 from apps.api.tests.test_audio_pipeline import FakeRegistry
 
 
@@ -76,7 +76,7 @@ class MeetingFlowTest(PostgresAsyncTestCase):
                             "app.pipelines.meeting_pipeline.get_speech_timestamps",
                             return_value=[{"start": 0, "end": SAMPLE_RATE}],
                         ), patch.object(models, "get_asr", return_value=lambda clip: {"text": "Xin chào"}):
-                            self.assertTrue(run_once(repository, data_dir, Settings(meeting_data_dir=data_dir)))
+                            self.assertTrue(run_once(repository, data_dir, Settings(meeting_data_dir=data_dir), self.database))
                             legacy = await client.post(
                                 "/api/audio/process", files={"file": ("meeting.wav", audio, "audio/wav")}
                             )
