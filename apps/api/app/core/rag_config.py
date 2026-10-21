@@ -75,7 +75,6 @@ class ChatSelection:
 @dataclass(frozen=True)
 class RagSettings:
     enabled: bool = False
-    database_url: SecretStr = field(default_factory=lambda: SecretStr(''), repr=False)
     providers: tuple[Provider, ...] = ()
     profiles: tuple[EmbeddingProfile, ...] = ()
     max_k: int = 10
@@ -119,10 +118,9 @@ def load_rag_settings(environment: Mapping[str, str]) -> RagSettings:
         max_k = int(environment.get('RAG_MAX_K', '10'))
         minimum = float(environment.get('RAG_MIN_COSINE_SIMILARITY', '.35'))
         version = environment.get('RAG_PROMPT_VERSION', 'meeting_qa_v1')
-        dsn = environment.get('RAG_DATABASE_URL', '')
-        if not 1 <= max_k <= 100 or not 0 <= minimum <= 1 or version != 'meeting_qa_v1' or not dsn:
+        if not 1 <= max_k <= 100 or not 0 <= minimum <= 1 or version != 'meeting_qa_v1':
             raise ValueError()
-        return RagSettings(True, SecretStr(dsn), tuple(providers), profiles, max_k, version, minimum)
+        return RagSettings(True, tuple(providers), profiles, max_k, version, minimum)
     except (ValueError, TypeError, KeyError, ValidationError):
         raise RagError('invalid_configuration') from None
 
