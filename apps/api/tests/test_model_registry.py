@@ -99,6 +99,35 @@ class SettingsTest(unittest.TestCase):
         with self.assertRaises(ConfigurationError):
             Settings.from_environment({"MODEL_DEVICE": "tpu"})
 
+class VoiceSettingsTest(unittest.TestCase):
+    def test_enabled_identification_requires_thresholds_and_pinned_revision(self):
+        base = {'VOICE_IDENTIFICATION_ENABLED': 'true'}
+        for extra in ({}, {'VOICE_MATCH_MIN_COSINE': '.8', 'VOICE_MATCH_MIN_MARGIN': '.1'},
+                      {'VOICE_MATCH_MIN_COSINE': 'nan', 'VOICE_MATCH_MIN_MARGIN': '.1', 'PYANNOTE_REVISION': 'a' * 40}):
+            with self.subTest(extra=extra), self.assertRaises(ConfigurationError):
+                Settings.from_environment(base | extra)
+        settings = Settings.from_environment(base | {'VOICE_MATCH_MIN_COSINE': '.8', 'VOICE_MATCH_MIN_MARGIN': '.1', 'PYANNOTE_REVISION': 'a' * 40})
+        self.assertTrue(settings.voice_identification_enabled)
+        self.assertFalse(Settings.from_environment({}).voice_identification_enabled)
+
+class PyannoteRevisionTest(unittest.TestCase):
+    def test_revision_is_only_forwarded_for_remote_pipeline(self) -> None:
+        import tempfile
+        from types import SimpleNamespace
+        from unittest.mock import Mock, patch
+        from app.core.audio_models import load_pyannote
+
+        pipeline_class = Mock()
+        module = SimpleNamespace(Pipeline=pipeline_class)
+        with patch.dict('sys.modules', {'pyannote.audio': module}):
+            load_pyannote(Settings(pyannote_revision='a' * 40, huggingface_token='test', model_device='cpu'))
+            pipeline_class.from_pretrained.assert_called_once_with(
+                Settings.pyannote_model, token='test', revision='a' * 40)
+            pipeline_class.reset_mock()
+            with tempfile.TemporaryDirectory() as directory:
+                load_pyannote(Settings(pyannote_model=directory, pyannote_revision='a' * 40, model_device='cpu'))
+                pipeline_class.from_pretrained.assert_called_once_with(directory, token=None)
+
 
 if __name__ == "__main__":
     unittest.main()

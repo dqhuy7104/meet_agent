@@ -238,6 +238,27 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 503)
         self.assertEqual(response.json()["detail"], "vad model unavailable")
 
+class EmbeddingSinkTest(unittest.TestCase):
+    def test_internal_sink_preserves_six_response_fields(self) -> None:
+        import numpy as np
+        models = FakeRegistry()
+        models.annotation = SimpleNamespace(speaker_diarization=models.annotation, speaker_embeddings=np.array([[3., 4.]]))
+        sink = {}
+        with patch('app.pipelines.meeting_pipeline.get_speech_timestamps', return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(models, 'get_asr', return_value=lambda audio: {'text': 'Hi'}):
+            response = process_audio(_wav_bytes(), 'a.wav', models, speaker_embeddings=sink)
+        self.assertEqual(set(response.model_dump()), {'filename', 'duration_seconds', 'transcript', 'vad_segments', 'diarization_segments', 'transcript_segments'})
+        self.assertEqual(sink, {'SPEAKER_00': [.6, .8]})
+        self.assertEqual(models.calls.count('diarization'), 1)
+
+    def test_invalid_centroid_is_not_recorded(self) -> None:
+        import numpy as np
+        models = FakeRegistry()
+        models.annotation = SimpleNamespace(speaker_diarization=models.annotation, speaker_embeddings=np.array([[float('nan'), 0.]]))
+        sink = {}
+        with patch('app.pipelines.meeting_pipeline.get_speech_timestamps', return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(models, 'get_asr', return_value=lambda audio: {'text': 'Hi'}):
+            process_audio(_wav_bytes(), 'a.wav', models, speaker_embeddings=sink)
+        self.assertEqual(sink, {})
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -13,3 +13,15 @@ def diarization_turns(result: Any) -> list[SpeakerTurn]:
         for segment, _, speaker in annotation.itertracks(yield_label=True)
     ]
     return sorted(turns, key=lambda turn: (turn.start, turn.end, turn.speaker))
+
+
+def extract_speaker_embeddings(result: Any) -> dict[str, list[float]]:
+    """Map centroid rows using annotation label order, never turn order."""
+    rows = getattr(result, "speaker_embeddings", None)
+    annotation = getattr(result, "speaker_diarization", None)
+    if rows is None or annotation is None:
+        return {}
+    labels = annotation.labels()
+    if len(rows) != len(labels):
+        return {}
+    return {str(label): row.tolist() for label, row in zip(labels, rows)}

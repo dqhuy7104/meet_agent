@@ -1,5 +1,6 @@
 """Voice profile and sample persistence; public records contain metadata only."""
 
+import json
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -103,3 +104,12 @@ class VoiceRepository:
         return self.connection.execute(
             "DELETE FROM voice_samples WHERE profile_id=%s AND id=%s",
             (profile_id, sample_id)).rowcount > 0
+
+    def profile_embeddings(self, fingerprint: str) -> dict[str, list[list[float]]]:
+        rows = self.connection.execute(
+            "SELECT profile_id,embedding::text FROM voice_samples WHERE fingerprint=%s ORDER BY id",
+            (fingerprint,)).fetchall()
+        profiles: dict[str, list[list[float]]] = {}
+        for profile_id, embedding in rows:
+            profiles.setdefault(profile_id, []).append(json.loads(embedding))
+        return profiles

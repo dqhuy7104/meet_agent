@@ -10,10 +10,14 @@ from app.core.audio_models import ModelRegistry
 from app.schemas.transcript import AudioProcessResponse, SpeechSegment, TranscriptSegment
 from app.services.alignment.align import speaker_for_region
 from app.services.audio.preprocess import SAMPLE_RATE, decode_audio
-from app.services.diarization.pyannote import diarization_turns
+from app.services.diarization.pyannote import diarization_turns, extract_speaker_embeddings
+from app.services.voice.matching import normalize_embedding
 
 
-def process_audio(data: bytes, filename: str, models: ModelRegistry) -> AudioProcessResponse:
+def process_audio(
+    data: bytes, filename: str, models: ModelRegistry, *,
+    speaker_embeddings: dict[str, list[float]] | None = None,
+) -> AudioProcessResponse:
     """Transcribe each speech region and retain original-audio timestamps.
 
     Language detection selects PhoWhisper or multilingual Whisper for each VAD
@@ -39,7 +43,13 @@ def process_audio(data: bytes, filename: str, models: ModelRegistry) -> AudioPro
         )
 
     diarization = models.get_diarization()
-    turns = diarization_turns(diarization({"waveform": audio.unsqueeze(0), "sample_rate": SAMPLE_RATE}))
+    result = diarization({"waveform": audio.unsqueeze(0), "sample_rate": SAMPLE_RATE})
+    turns = diarization_turns(result)
+    if speaker_embeddings is not None:
+        for label, values in extract_speaker_embeddings(result).items():
+            vector = normalize_embedding(values)
+            if vector is not None:
+                speaker_embeddings[label] = vector
     language_detector = models.get_language()
     transcripts: list[TranscriptSegment] = []
     for part in timestamps:

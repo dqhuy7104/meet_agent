@@ -139,7 +139,10 @@ def load_pyannote(settings: Settings) -> Any:
             "HUGGINGFACE_TOKEN is required to load a remote pyannote pipeline; "
             "accept the model agreement on Hugging Face first"
         )
-    pipeline = Pipeline.from_pretrained(settings.pyannote_model, token=settings.huggingface_token)
+    options = {"token": settings.huggingface_token}
+    if not is_local_pipeline and settings.pyannote_revision is not None:
+        options["revision"] = settings.pyannote_revision
+    pipeline = Pipeline.from_pretrained(settings.pyannote_model, **options)
     if pipeline is None:
         raise RuntimeError(f"pyannote returned no pipeline for {settings.pyannote_model!r}")
     if _use_cuda(settings):

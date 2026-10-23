@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import math
 import os
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -24,6 +26,10 @@ class Settings:
         "ab3dfc803ab6384ac507dc81f0d46fd1613058b8/lang95/lang_classifier_95.onnx"
     )
     pyannote_model: str = "pyannote/speaker-diarization-community-1"
+    pyannote_revision: str | None = None
+    voice_identification_enabled: bool = False
+    voice_match_min_cosine: float | None = None
+    voice_match_min_margin: float | None = None
     model_device: str = "auto"
     huggingface_token: str | None = None
     meeting_data_dir: Path = Path("./meeting-data")
@@ -63,11 +69,34 @@ class Settings:
             raise ConfigurationError("MEETING_DATA_DIR must not be empty")
         if bot_admission_timeout_seconds < 1:
             raise ConfigurationError("BOT_ADMISSION_TIMEOUT_SECONDS must be positive")
+        revision = values.get("PYANNOTE_REVISION", "").strip() or None
+        enabled_value = values.get("VOICE_IDENTIFICATION_ENABLED", "false").strip().lower()
+        if enabled_value not in {"true", "false"}:
+            raise ConfigurationError("VOICE_IDENTIFICATION_ENABLED must be true or false")
+        enabled = enabled_value == "true"
+        thresholds: list[float | None] = []
+        for name, lower, upper in (("VOICE_MATCH_MIN_COSINE", -1, 1), ("VOICE_MATCH_MIN_MARGIN", 0, 2)):
+            raw = values.get(name, "").strip()
+            try:
+                threshold = float(raw) if raw else None
+            except ValueError as error:
+                raise ConfigurationError(f"{name} must be a finite number") from error
+            if threshold is not None and (not math.isfinite(threshold) or not lower <= threshold <= upper):
+                raise ConfigurationError(f"{name} must be between {lower} and {upper}")
+            if enabled and threshold is None:
+                raise ConfigurationError(f"{name} is required when voice identification is enabled")
+            thresholds.append(threshold)
+        if enabled and not Path(pyannote_model).exists() and (not revision or not re.fullmatch(r"[0-9a-fA-F]{40}", revision)):
+            raise ConfigurationError("PYANNOTE_REVISION must be an immutable 40-character commit for voice identification")
         return cls(
             phowhisper_model=phowhisper_model,
             whisper_model=whisper_model,
             silero_lang95_model=silero_lang95_model,
             pyannote_model=pyannote_model,
+            pyannote_revision=revision,
+            voice_identification_enabled=enabled,
+            voice_match_min_cosine=thresholds[0],
+            voice_match_min_margin=thresholds[1],
             model_device=model_device,
             huggingface_token=huggingface_token,
             meeting_data_dir=Path(meeting_data_dir).expanduser().resolve(),
