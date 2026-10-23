@@ -32,6 +32,9 @@ import {
   X,
 } from "lucide-react";
 import { ApiError, meetingApi, type BackendMeeting } from "./lib/api";
+import { VoiceProfilesPage } from "./components/VoiceProfilesPage";
+import { MeetingSpeakerIdentities } from "./components/MeetingSpeakerIdentities";
+import { speakerDisplay } from "./lib/voiceDisplay";
 import { MeetBotPanel } from "./components/MeetBotPanel";
 import { MeetingSearchChat } from "./components/MeetingSearchChat";
 import { findAudioPartAtTime } from "./lib/timeline";
@@ -71,6 +74,7 @@ function Shell({ children }: { children: ReactNode }) {
     ["/", "Tổng quan", LayoutDashboard],
     ["/meetings", "Cuộc họp", FileAudio],
     ["/chat", "Hỏi từ cuộc họp", Search],
+    ["/voice-profiles", "Hồ sơ giọng nói", FileAudio],
     ["/settings", "Cài đặt", Settings],
   ] as const;
   return (
@@ -94,7 +98,7 @@ function Shell({ children }: { children: ReactNode }) {
         </div>
         <nav>
           {navigation.map(([to, name, Icon]) => (
-            <NavLink key={to} to={to} end={to === "/"}>
+            <NavLink key={to} to={to} end={to === "/"} aria-label={name} title={name}>
               {createElement(Icon as ComponentType<{ size?: number }>, {
                 size: 19,
               })}
@@ -713,7 +717,7 @@ function LocalWorkspace({ id }: { id: string }) {
                   <i>{segment.speaker}</i>
                   <div>
                     <header>
-                      <b>{segment.speaker}</b>
+                      <b>{speakerDisplay(segment.speaker, meeting.speaker_identities ?? []).name} · {segment.speaker}</b>
                       <button
                         onClick={(event) => {
                           event.stopPropagation();
@@ -746,6 +750,13 @@ function LocalWorkspace({ id }: { id: string }) {
               </div>
             </div>
             <div className="insight-body">
+              <MeetingSpeakerIdentities
+                meetingId={id}
+                speakers={[...new Set(meeting.diarization_segments.map(turn => turn.speaker))]}
+                identities={meeting.speaker_identities ?? []}
+                status={meeting.voice_identification_status ?? "not_run"}
+                onCorrected={identity => setMeeting(current => current?.id === id ? {...current, speaker_identities: [...(current.speaker_identities ?? []).filter(item => item.speaker !== identity.speaker), identity]} : current)}
+              />
               <h4>Diarization</h4>
               <p>
                 {meeting.diarization_segments.length} speaker turn được backend
@@ -793,6 +804,7 @@ export default function App() {
         <Route path="/meetings" element={<Meetings />} />
         <Route path="/chat" element={<MeetingSearchChat />} />
         <Route path="/workspace/:id" element={<Workspace />} />
+        <Route path="/voice-profiles" element={<VoiceProfilesPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Routes>
     </Shell>
