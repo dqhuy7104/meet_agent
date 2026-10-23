@@ -16,16 +16,16 @@ class InvalidAudioError(ValueError):
 
 
 class AudioTooLongError(InvalidAudioError):
-    """Decoded audio exceeds the shared 30-minute duration limit."""
+    """Decoded audio exceeds the requested duration limit."""
 
 
-def decode_audio(data: bytes) -> np.ndarray:
+def decode_audio(data: bytes, *, max_duration_seconds: float = MAX_DURATION_SECONDS) -> np.ndarray:
     """Decode an audio upload with FFmpeg into mono float32 samples."""
     if not data:
         raise InvalidAudioError("Audio file is empty")
     command = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", "pipe:0", "-t", str(MAX_DURATION_SECONDS + 1),
+        "-i", "pipe:0", "-t", str(max_duration_seconds + 1),
         "-ac", "1", "-ar", str(SAMPLE_RATE), "-f", "f32le", "pipe:1",
     ]
     try:
@@ -39,6 +39,6 @@ def decode_audio(data: bytes) -> np.ndarray:
     waveform = np.frombuffer(completed.stdout, dtype="<f4")
     if waveform.size == 0:
         raise InvalidAudioError("Audio contains no samples")
-    if waveform.size > MAX_DURATION_SECONDS * SAMPLE_RATE:
-        raise AudioTooLongError("Audio must be at most 30 minutes long")
+    if waveform.size > max_duration_seconds * SAMPLE_RATE:
+        raise AudioTooLongError(f"Audio must be at most {max_duration_seconds / 60:g} minutes long")
     return waveform.copy()
