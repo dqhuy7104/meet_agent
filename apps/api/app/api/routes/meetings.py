@@ -29,6 +29,7 @@ from app.services.meetings.repository import (
     IdempotencyConflict, MeetingRecord, MeetingRepository, MeetingStateConflict,
 )
 from app.services.meetings.storage import audio_path, audio_publication_lock, publish_audio
+from app.services.voice.repository import VoiceRepository
 from app.services.meetings.worker import terminate_process
 
 
@@ -195,6 +196,8 @@ def get_meeting(
         raise HTTPException(status_code=404, detail="Meeting not found")
     return MeetingDetailResponse(
         **_metadata(detail.meeting).model_dump(),
+        voice_identification_status=detail.meeting.voice_identification_status,
+        speaker_identities=[identity.__dict__ for identity in VoiceRepository(repository.connection).identities_for_meeting(meeting_id)],
         transcript=detail.meeting.transcript if detail.meeting.status == "completed" else None,
         vad_segments=detail.vad_segments,
         diarization_segments=detail.diarization_segments,

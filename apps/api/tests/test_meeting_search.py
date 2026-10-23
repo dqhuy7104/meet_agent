@@ -67,7 +67,7 @@ class MeetingSearchTest(PostgresAsyncTestCase):
         self.assertEqual(response.json()["total"], 1)
         self.assertEqual(response.json()["items"], [{
             "meeting_id": meeting_id, "title": "Buổi họp", "speaker": "SPEAKER_01",
-            "start": 3.0, "end": 4.0, "text": "Kế hoạch quý mới",
+            "start": 3.0, "end": 4.0, "text": "Kế hoạch quý mới", "speaker_name": None,
         }])
 
     async def test_queued_and_failed_meetings_do_not_appear(self) -> None:

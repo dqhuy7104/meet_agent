@@ -77,6 +77,7 @@ class MeetingDetail:
 
 @dataclass(frozen=True)
 class SearchHit:
+    speaker_name: str | None
     meeting_id: str
     title: str | None
     speaker: str
@@ -299,12 +300,14 @@ class MeetingRepository:
 
     def search_segments(self, query: str, limit: int, offset: int) -> tuple[list[SearchHit], int]:
         joined = """FROM transcript_segments AS segment JOIN meetings AS meeting ON meeting.id=segment.meeting_id
+            LEFT JOIN meeting_speaker_identities AS identity ON identity.meeting_id=meeting.id AND identity.speaker=segment.speaker
+            LEFT JOIN voice_profiles AS profile ON profile.id=identity.profile_id
             WHERE segment.document @@ plainto_tsquery('simple',%s) AND meeting.status='completed'"""
         with self.connection.transaction():
             self.connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
             total = self.connection.execute("SELECT count(*) " + joined, (query,)).fetchone()[0]
             rows = self._execute("""SELECT meeting.id AS meeting_id,meeting.title,segment.speaker,
-                segment.start_seconds AS start,segment.end_seconds AS end,segment.text """ + joined +
+                segment.start_seconds AS start,segment.end_seconds AS end,segment.text,profile.display_name AS speaker_name """ + joined +
                 " ORDER BY meeting.created_at DESC,meeting.id DESC,segment.start_seconds,segment.id LIMIT %s OFFSET %s",
                 (query, limit, offset)).fetchall()
             return [SearchHit(**row) for row in rows], total

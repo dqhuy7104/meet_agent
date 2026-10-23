@@ -6,6 +6,7 @@ from typing import Literal
 
 from pydantic import BaseModel
 
+from app.schemas.voice import SpeakerIdentityResponse
 from app.schemas.transcript import SpeakerTurn, SpeechSegment, TranscriptSegment
 
 
@@ -47,6 +48,8 @@ class MeetingAudioFileResponse(BaseModel):
 
 
 class MeetingDetailResponse(MeetingMetadataResponse):
+    voice_identification_status: str
+    speaker_identities: list[SpeakerIdentityResponse]
     transcript: str | None
     vad_segments: list[SpeechSegment]
     diarization_segments: list[SpeakerTurn]
@@ -55,6 +58,7 @@ class MeetingDetailResponse(MeetingMetadataResponse):
 
 
 class SearchHitResponse(BaseModel):
+    speaker_name: str | None
     meeting_id: str
     title: str | None
     speaker: str
