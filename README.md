@@ -308,3 +308,80 @@ connections in a background thread; cancellation returns without waiting for
 blocking cleanup, while that thread closes its resources and checks cancellation
 before further provider work. `/api/chat/evaluation-state` exposes only local
 revision/configuration metadata so evaluation can reject corpus or prompt drift.
+
+## Local voice identification (opt-in)
+
+Voice profiles and manual speaker corrections are local-only. Create a profile
+on `/app/voice-profiles`, then enroll a separate upload or a speaker from a
+completed meeting. Uploads must contain one speaker, at least 10 seconds of
+exclusive speech, at most two minutes and 25 MiB. The shared meeting worker
+processes enrollment jobs. Each profile retains five samples in successful
+insertion order: a sixth successful enrollment evicts the oldest; a failed job
+evicts nothing. Corrections affect only that meeting; enrollment is explicit.
+Existing completed meetings are not automatically reidentified.
+
+Before starting API and worker, explicitly apply shared PostgreSQL migrations:
+
+```bash
+PYTHONPATH=apps/api uv run --env-file .env python -m app.db.migrate
+```
+
+This includes `002_voice_identification.sql` (profiles, samples, jobs and
+identities) and `003_voice_enrollment_lifecycle.sql` (enrollment recovery and
+cancellation). Requests never run migrations. PostgreSQL via `DATABASE_URL`
+owns meeting, bot, outbox, voice and RAG state; `MEETING_DATA_DIR` holds private
+audio. Older SQLite setup/backup descriptions above are historical and do not
+apply to this PostgreSQL deployment.
+
+Enrollment and matching reuse the configured pyannote pipeline. For a remote
+pipeline set `PYANNOTE_REVISION` to its immutable 40-character Hugging Face
+commit; a branch or tag is insufficient. Local fingerprints hash the pipeline
+configuration and embedding checkpoint. Fingerprints also include pyannote.audio
+version and 16 kHz mono float32 preprocessing. Samples from another fingerprint
+stay visible/deletable but cannot match the current model. Automatic matching
+remains off by default (`VOICE_IDENTIFICATION_ENABLED=false`); no production
+similarity defaults or real accuracy/latency measurements are supplied.
+
+After obtaining approval for a held-out dataset, prepare a private CSV with
+`audio_path,person_id,session_id,role`. Roles are `enrollment` or `probe`;
+relative paths resolve beside the CSV. Include known probes and unknown people
+without enrollment rows. Enrollment and probe sessions for each person must
+differ. Enrollment row order defines FIFO; only the last five per person are
+retained. All clips use the production upload extraction requirements above.
+Run locally with explicit candidate grids (values below are illustrative,
+not recommended thresholds):
+
+```bash
+uv run --env-file .env python -m ai_training.evaluation.evaluate_voice_identification \
+  --manifest /private/held-out.csv --dataset-version approved-heldout-v1 \
+  --thresholds 0.7 0.8 0.9 --margins 0.05 0.1 0.2 \
+  --output ai_training/results/voice-calibration.json
+```
+
+The report contains counts, fingerprint, model revision, dependencies,
+preprocessing, candidate grids, FAR/FRR, unknown rate, correct identification
+rate, and extraction latency including cold loading. It omits audio paths and
+content. FAR measures accepted impostor trials (unknown probes or a wrong top
+identity) divided by impostor trials; FRR measures rejected known probes;
+unknown rate measures all rejected probes. The selected pair maximizes correct
+identification of known probes among candidates with empirical FAR <=1%; ties
+retain grid order. No valid candidate produces null calibration: keep automatic
+identification disabled. Small datasets do not establish a statistical 1% error
+guarantee. Record baseline/candidate results, latency/cost and known regressions
+for the exact fingerprint before setting both `VOICE_MATCH_MIN_COSINE` and
+`VOICE_MATCH_MIN_MARGIN` and enabling identification. Preserve a separate final
+test split for an unbiased quality result after calibration. No approved dataset
+is supplied and no real-model quality or latency result is claimed.
+
+Voiceprints are sensitive personal data. Keep manifests, reports, recordings,
+vectors and provider tokens out of Git and logs; do not send them to external
+providers. Uploaded enrollment audio is deleted after success/failure/cancellation;
+embeddings persist until FIFO eviction or explicit sample/profile deletion.
+Deleting a profile clears its identity mappings; deleting/cancelling a source
+meeting removes its enrolled samples without revising assignments in other
+meetings. Stop API, worker, bot and RAG processes before a coordinated backup of
+PostgreSQL (`pg_dump`) and the private data root. Apply the same access and
+retention controls to backups; deleting live samples does not erase backups.
+Rollback by setting `VOICE_IDENTIFICATION_ENABLED=false`, restarting processes,
+and reverting use of the additive API/UI fields. Keep additive tables intact;
+remove biometric data explicitly through sample/profile deletion when desired.
