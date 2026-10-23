@@ -60,6 +60,7 @@ class MeetingRecord:
     pipeline_start_ticks: int | None
     cancelled_at: str | None
     source: str
+    voice_identification_status: str = "not_run"
 
 
 @dataclass(frozen=True)

@@ -12,9 +12,15 @@ class DatabaseMigrationTest(unittest.TestCase):
     def test_initialization_repeat_checksums_and_storage_identity(self) -> None:
         with isolated_postgres(migrate=False) as fixture:
             migrate_database(fixture.connection)
+            self.assertEqual([row[0] for row in fixture.connection.execute(
+                "SELECT version FROM schema_migrations ORDER BY version").fetchall()], [1, 2])
+            from app.services.meetings.repository import MeetingRepository
+            MeetingRepository(fixture.connection).create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+            self.assertEqual(fixture.connection.execute(
+                "SELECT voice_identification_status FROM meetings WHERE id='m'").fetchone()[0], "not_run")
             identity = fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0]
             migrate_database(fixture.connection)
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 1)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 2)
             self.assertEqual(fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0], identity)
             with open_database(fixture.database) as connection:
                 validate_database(connection)
@@ -32,7 +38,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                     migrate_database(connection)
             with ThreadPoolExecutor(max_workers=2) as executor:
                 list(executor.map(lambda _: migrate(), range(2)))
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 1)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 2)
 
     def test_unversioned_application_tables_are_not_adopted(self) -> None:
         with isolated_postgres(migrate=False) as fixture:
