@@ -94,7 +94,8 @@ def extract_meeting_embedding(
     stored = [turn.model_copy(update={'start': turn.start - part.start_seconds,
                                       'end': turn.end - part.start_seconds})
               for turn in detail.diarization_segments]
-    intervals = _exclusive_intervals(stored, speaker, duration)
+    stored_end = max(turn.end for turn in stored if turn.speaker == speaker)
+    intervals = _exclusive_intervals(stored, speaker, stored_end)
     seconds = sum(end - start for start, end in intervals)
     if seconds < 10:
         raise EnrollmentError('insufficient_speech')

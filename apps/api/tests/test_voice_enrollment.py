@@ -121,3 +121,13 @@ class EnrollmentTests(unittest.TestCase):
             audio_path(root, '22222222222222222222222222222222').unlink()
             self.assert_code('source_changed', lambda: extract_meeting_embedding(
                 detail, 'PART_2_OLD', root, Models([])))
+
+    def test_meeting_source_rejects_truncation_using_original_exclusive_duration(self):
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = audio_path(root, '22222222222222222222222222222222')
+            path.parent.mkdir(parents=True)
+            path.write_bytes(audio(12))
+            detail = self.detail([(40, 60, 'PART_2_OLD')])
+            self.assert_code('source_changed', lambda: extract_meeting_embedding(
+                detail, 'PART_2_OLD', root, Models([(0, 12, 'A')])))
