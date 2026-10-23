@@ -91,3 +91,76 @@ class ChildConnectionFailureTest(PostgresTestCase):
             run_once(repository, self.data_dir, Settings(), self.database, lease)
         self.assertEqual(repository.get_meeting('m').status, 'failed')
         self.assertEqual(repository.retry('m').status, 'queued')
+
+
+def complete_either_queue(job_id, data_dir, settings, database, start_event, ownership_event):
+    from app.db.session import open_database
+    from app.services.voice.repository import VoiceRepository
+    start_event.wait()
+    with open_database(database) as connection:
+        if ownership_event.is_set():
+            voices = VoiceRepository(connection)
+            if voices.get_job(job_id):
+                voices.complete_job(job_id, [1., 0.], 'fingerprint')
+            else:
+                MeetingRepository(connection).complete(job_id, result())
+
+
+class QueueSelectionTest(PostgresTestCase):
+    def test_alternating_selector_runs_enrollment_between_meetings(self):
+        from app.services.voice.repository import VoiceRepository
+        from app.services.voice.storage import ingest_enrollment_upload
+        initialize_meeting_storage(self.data_dir, self.connection)
+        meetings = MeetingRepository(self.connection)
+        voices = VoiceRepository(self.connection)
+        profile = voices.create_profile('Participant')
+        job = ingest_enrollment_upload(self.database, self.data_dir, profile.id, b'audio')
+        for name in ('first', 'second'):
+            meetings.create_meeting(name, None, 'a.wav', name[0]*32, 'hash', None)
+        context = multiprocessing.get_context('spawn')
+        make_process = context.Process
+        def process(**kwargs):
+            kwargs['target'] = complete_either_queue
+            return make_process(**kwargs)
+        with worker_lease(self.database, 'meeting') as lease, patch.object(context, 'Process', process):
+            for preference, expected in ((False, ('completed', 'queued', 'queued')), (True, ('completed', 'completed', 'queued')), (False, ('completed', 'completed', 'completed'))):
+                self.assertTrue(run_once(meetings, self.data_dir, Settings(), self.database, lease, prefer_enrollment=preference))
+                self.assertEqual((meetings.get_meeting('first').status, voices.get_job(job.id).status, meetings.get_meeting('second').status), expected)
+
+    def test_enrollment_lost_lease_reaps_child_and_allows_recovery(self):
+        from app.services.voice.repository import VoiceRepository
+        from app.services.voice.storage import ingest_enrollment_upload
+        voices = VoiceRepository(self.connection)
+        profile = voices.create_profile('Participant')
+        job = ingest_enrollment_upload(self.database, self.data_dir, profile.id, b'audio')
+        meetings = MeetingRepository(self.connection)
+        context = multiprocessing.get_context('spawn')
+        make_process = context.Process
+        def process(**kwargs):
+            kwargs['target'] = wait_for_termination
+            return make_process(**kwargs)
+        with worker_lease(self.database, 'meeting') as lease, patch.object(context, 'Process', process):
+            def disconnect():
+                with self.open_connection() as connection:
+                    for _ in range(100):
+                        pid = connection.execute('SELECT pipeline_pid FROM voice_enrollment_jobs WHERE id=%s', (job.id,)).fetchone()[0]
+                        if pid:
+                            connection.execute('SELECT pg_terminate_backend(%s)', (lease.connection.info.backend_pid,))
+                            return
+                        time.sleep(.02)
+            killer = threading.Thread(target=disconnect)
+            killer.start()
+            try:
+                with self.assertRaises(DatabaseUnavailableError):
+                    run_once(meetings, self.data_dir, Settings(), self.database, lease)
+            finally:
+                killer.join(3)
+        pid = self.connection.execute('SELECT pipeline_pid FROM voice_enrollment_jobs WHERE id=%s', (job.id,)).fetchone()[0]
+        self.assertIsNone(process_start_ticks(pid))
+        voices.recover_interrupted_jobs()
+        self.assertEqual(voices.get_job(job.id).status, 'queued')
+
+
+def wait_for_termination(job_id, data_dir, settings, database, start_event, ownership_event):
+    start_event.wait()
+    time.sleep(20)

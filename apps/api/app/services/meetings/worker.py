@@ -19,6 +19,9 @@ from app.db.session import open_database, validate_database
 from app.core.database_config import DatabaseSettings, DatabaseUnavailableError, get_database_settings
 from app.db.worker_locks import WorkerLease, worker_lease
 import psycopg
+from app.services.voice.repository import VoiceRepository
+from app.services.voice.enrollment import EnrollmentError, extract_upload_embedding, extract_meeting_embedding
+from app.services.voice.matching import pipeline_fingerprint
 from app.services.meetings.storage import initialize_meeting_storage
 from app.pipelines.meeting_pipeline import process_audio
 from app.services.audio.preprocess import AudioTooLongError, InvalidAudioError
@@ -94,6 +97,48 @@ def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, dat
         connection.close()
 
 
+def run_claimed_enrollment(job_id: str, data_dir: Path, settings: Settings, database: DatabaseSettings,
+                           start_event: Event, ownership_event: Event) -> None:
+    """Extract outside transactions and publish only while the worker owns its lease."""
+    start_event.wait()
+    connection = open_database(database)
+    repository = VoiceRepository(connection)
+    job = None
+    try:
+        job = repository.get_job(job_id)
+        if job is None or job.status != 'processing':
+            return
+        try:
+            fingerprint = pipeline_fingerprint(settings)
+            models = ModelRegistry(settings)
+            if job.source == 'upload':
+                embedding = extract_upload_embedding(audio_path(data_dir, job.storage_key).read_bytes(), models)
+            else:
+                detail = MeetingRepository(connection).get_detail(job.source_meeting_id)
+                if detail is None:
+                    raise EnrollmentError('source_changed')
+                embedding = extract_meeting_embedding(detail, job.source_speaker, data_dir, models)
+            if ownership_event.is_set():
+                repository.complete_job(job_id, embedding, fingerprint)
+        except psycopg.Error:
+            logger.warning('Enrollment database unavailable')
+            raise SystemExit(1) from None
+        except EnrollmentError as error:
+            if ownership_event.is_set():
+                repository.fail_job(job_id, error.code)
+        except (ModelLoadError, ValueError):
+            if ownership_event.is_set():
+                repository.fail_job(job_id, 'model_unavailable')
+        except Exception:
+            if ownership_event.is_set():
+                repository.fail_job(job_id, 'processing_error')
+        stored = repository.get_job(job_id)
+        if job.storage_key and (stored is None or stored.status in ('completed', 'failed')):
+            audio_path(data_dir, job.storage_key).unlink(missing_ok=True)
+    finally:
+        connection.close()
+
+
 def process_meeting_parts(
     parts: list[MeetingAudioFile], data_dir: Path, models: ModelRegistry,
     source: str = "upload",
@@ -143,34 +188,50 @@ def process_meeting_parts(
 
 
 def run_once(repository: MeetingRepository, data_dir: Path, settings: Settings,
-             database: DatabaseSettings, lease: WorkerLease) -> bool:
-    """Supervise one spawned child without inheriting PostgreSQL connections."""
+             database: DatabaseSettings, lease: WorkerLease, prefer_enrollment: bool = False) -> bool:
+    """Supervise either queue with the same spawned-child ownership checks."""
     lease.ensure_owned()
-    meeting = repository.claim_next()
-    if meeting is None:
+    voices = VoiceRepository(repository.connection)
+    claims = ((voices.claim_next_job, True), (repository.claim_next, False))
+    if not prefer_enrollment:
+        claims = tuple(reversed(claims))
+    for claim, is_enrollment in claims:
+        job = claim()
+        if job is not None:
+            break
+    else:
         return False
     context = multiprocessing.get_context("spawn")
     start_event, ownership_event = context.Event(), context.Event()
     ownership_event.set()
-    process = context.Process(target=run_claimed_meeting,
-        args=(meeting.id, data_dir, settings, database, start_event, ownership_event), daemon=True)
+    target = run_claimed_enrollment if is_enrollment else run_claimed_meeting
+    process = context.Process(target=target,
+        args=(job.id, data_dir, settings, database, start_event, ownership_event), daemon=True)
     process.start()
     try:
         start_ticks = process_start_ticks(process.pid)
-        if start_ticks is None or not repository.set_pipeline_process(meeting.id, process.pid, start_ticks):
+        set_process = voices.set_job_process if is_enrollment else repository.set_pipeline_process
+        if start_ticks is None or not set_process(job.id, process.pid, start_ticks):
             return True
         start_event.set()
         while process.is_alive():
             process.join(timeout=0.2)
             lease.ensure_owned()
         if process.exitcode != 0:
-            repository.fail(meeting.id, 'processing_error')
+            if is_enrollment:
+                voices.fail_job(job.id, 'processing_error')
+            else:
+                repository.fail(job.id, 'processing_error')
         return True
     finally:
         ownership_event.clear()
         if process.is_alive():
             process.kill()
         process.join()
+        if is_enrollment and job.storage_key:
+            stored = voices.get_job(job.id)
+            if stored is None or stored.status in ('completed', 'failed'):
+                audio_path(data_dir, job.storage_key).unlink(missing_ok=True)
 
 
 def main() -> None:
@@ -185,9 +246,13 @@ def main() -> None:
                         initialize_meeting_storage(data_dir, connection)
                         repository = MeetingRepository(connection)
                         repository.recover_interrupted()
+                        VoiceRepository(connection).recover_interrupted_jobs()
                         cleanup_orphaned_audio(data_dir, repository)
+                        prefer_enrollment = False
                         while True:
-                            if not run_once(repository, data_dir, settings, database, lease):
+                            if run_once(repository, data_dir, settings, database, lease, prefer_enrollment):
+                                prefer_enrollment = not prefer_enrollment
+                            else:
                                 time.sleep(1)
                 except (psycopg.OperationalError, DatabaseUnavailableError) as error:
                     if getattr(error, 'code', '') not in ('', 'worker_ownership_lost'):

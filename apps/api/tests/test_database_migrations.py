@@ -13,14 +13,14 @@ class DatabaseMigrationTest(unittest.TestCase):
         with isolated_postgres(migrate=False) as fixture:
             migrate_database(fixture.connection)
             self.assertEqual([row[0] for row in fixture.connection.execute(
-                "SELECT version FROM schema_migrations ORDER BY version").fetchall()], [1, 2])
+                "SELECT version FROM schema_migrations ORDER BY version").fetchall()], [1, 2, 3])
             from app.services.meetings.repository import MeetingRepository
             MeetingRepository(fixture.connection).create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
             self.assertEqual(fixture.connection.execute(
                 "SELECT voice_identification_status FROM meetings WHERE id='m'").fetchone()[0], "not_run")
             identity = fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0]
             migrate_database(fixture.connection)
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 2)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 3)
             self.assertEqual(fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0], identity)
             with open_database(fixture.database) as connection:
                 validate_database(connection)
@@ -38,7 +38,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                     migrate_database(connection)
             with ThreadPoolExecutor(max_workers=2) as executor:
                 list(executor.map(lambda _: migrate(), range(2)))
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 2)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 3)
 
     def test_unversioned_application_tables_are_not_adopted(self) -> None:
         with isolated_postgres(migrate=False) as fixture:
@@ -61,3 +61,17 @@ class DatabaseMigrationTest(unittest.TestCase):
             for values in ((-1, 0, 1), (0, -1, 1), (0, 2, 1)):
                 with self.subTest(values=values), self.assertRaises(psycopg.errors.CheckViolation):
                     fixture.connection.execute('INSERT INTO vad_segments VALUES (%s,%s,%s,%s)', ('m', *values))
+
+    def test_upgrade_keeps_existing_jobs_and_fails_them_after_profile_deletion(self) -> None:
+        from unittest.mock import patch
+        from app.db.migrate import migration_definitions
+        definitions = migration_definitions()
+        with isolated_postgres(migrate=False) as fixture:
+            with patch('app.db.migrate.migration_definitions', return_value=definitions[:2]):
+                migrate_database(fixture.connection)
+            fixture.connection.execute("INSERT INTO voice_profiles(id,display_name) VALUES ('p','Participant')")
+            fixture.connection.execute("INSERT INTO voice_enrollment_jobs(id,profile_id,source,upload_key) VALUES ('j','p','upload',%s)", ('a'*32,))
+            migrate_database(fixture.connection)
+            fixture.connection.execute("DELETE FROM voice_profiles WHERE id='p'")
+            self.assertEqual(fixture.connection.execute("SELECT profile_id,state,failure_code FROM voice_enrollment_jobs WHERE id='j'").fetchone(),
+                             (None, 'failed', 'source_changed'))

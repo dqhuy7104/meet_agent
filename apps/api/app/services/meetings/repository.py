@@ -240,7 +240,9 @@ class MeetingRepository:
 
     def referenced_audio_keys(self) -> set[str]:
         return {row[0] for row in self.connection.execute(
-            "SELECT storage_key FROM meeting_audio_files UNION SELECT storage_key FROM bot_session_parts")}
+            """SELECT storage_key FROM meeting_audio_files UNION SELECT storage_key FROM bot_session_parts
+            UNION SELECT upload_key FROM voice_enrollment_jobs
+            WHERE upload_key IS NOT NULL AND state IN ('queued','processing')""")}
 
     def get_detail(self, meeting_id: str) -> MeetingDetail | None:
         if self.connection.info.transaction_status == TransactionStatus.IDLE:
