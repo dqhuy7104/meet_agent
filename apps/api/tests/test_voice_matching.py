@@ -1,7 +1,10 @@
+from contextlib import contextmanager
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterator
 
 import numpy as np
 from pyannote.core import Annotation, Segment
@@ -11,6 +14,16 @@ from app.services.diarization.pyannote import extract_speaker_embeddings
 from app.services.voice.matching import match_speakers, normalize_embedding, pipeline_fingerprint
 from app.services.voice.repository import VoiceRepository
 from apps.api.tests.postgres_support import PostgresTestCase
+
+
+@contextmanager
+def _working_directory(path: Path) -> Iterator[None]:
+    previous = Path.cwd()
+    os.chdir(path)
+    try:
+        yield
+    finally:
+        os.chdir(previous)
 
 
 class VoiceMatchingTest(unittest.TestCase):
@@ -45,12 +58,58 @@ class VoiceMatchingTest(unittest.TestCase):
         self.assertNotEqual(first, pipeline_fingerprint(Settings(pyannote_revision='b' * 40)))
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            (root / 'config.yaml').write_text('pipeline:\n  params:\n    embedding: embedding.bin\n')
+            (root / 'config.yaml').write_text(f'pipeline:\n  params:\n    embedding: {root / "embedding.bin"}\n')
             (root / 'embedding.bin').write_bytes(b'one')
             settings = Settings(pyannote_model=directory)
             first = pipeline_fingerprint(settings)
             (root / 'embedding.bin').write_bytes(b'two')
             self.assertNotEqual(first, pipeline_fingerprint(settings))
+
+    def test_plain_relative_checkpoint_uses_process_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / 'model'
+            model.mkdir()
+            config = model / 'config.yaml'
+            config.write_text('pipeline:\n  params:\n    embedding: embedding.bin\n')
+            (model / 'embedding.bin').write_bytes(b'config-directory-decoy')
+            checkpoint = root / 'embedding.bin'
+            checkpoint.write_bytes(b'loaded-checkpoint')
+            with _working_directory(root):
+                settings = Settings(pyannote_model=str(config))
+                first = pipeline_fingerprint(settings)
+                (model / 'embedding.bin').write_bytes(b'changed-decoy')
+                self.assertEqual(first, pipeline_fingerprint(settings))
+                checkpoint.write_bytes(b'changed-loaded-checkpoint')
+                self.assertNotEqual(first, pipeline_fingerprint(settings))
+
+    def test_model_subfolder_and_checkpoint_mapping_references(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            model = root / 'model'
+            model.mkdir()
+            embedding = model / 'embedding'
+            embedding.mkdir()
+            checkpoint = embedding / 'pytorch_model.bin'
+            config = model / 'config.yaml'
+            references = (
+                '$model/embedding',
+                '{checkpoint: "' + str(model) + '", subfolder: embedding}',
+                '{checkpoint: "' + str(checkpoint) + '"}',
+                '{checkpoint: model, subfolder: embedding}',
+                '{checkpoint: model/embedding}',
+                'model/embedding',
+            )
+            with _working_directory(root):
+                for reference in references:
+                    for source in (model, config):
+                        with self.subTest(reference=reference, source=source):
+                            config.write_text(f'pipeline:\n  params:\n    embedding: {reference}\n')
+                            checkpoint.write_bytes(b'first')
+                            settings = Settings(pyannote_model=str(source))
+                            first = pipeline_fingerprint(settings)
+                            checkpoint.write_bytes(b'second')
+                            self.assertNotEqual(first, pipeline_fingerprint(settings))
 
 
 class VoiceFingerprintRepositoryTest(PostgresTestCase):

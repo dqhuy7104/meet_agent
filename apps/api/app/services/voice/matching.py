@@ -5,7 +5,7 @@ from hashlib import sha256
 from importlib.metadata import version
 from pathlib import Path
 import re
-from typing import Mapping, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import yaml
@@ -57,6 +57,27 @@ def match_speakers(
     return matches
 
 
+def _local_embedding_checkpoint(reference: str | Mapping[str, Any], model_dir: Path) -> Path:
+    """Follow pyannote's $model expansion and local Model.from_pretrained rules."""
+    if isinstance(reference, Mapping):
+        checkpoint = Path(reference['checkpoint'])
+        subfolder = reference.get('subfolder')
+        revision = reference.get('revision')
+    elif reference.startswith('$model/'):
+        checkpoint = model_dir
+        subfolder, separator, revision = reference[len('$model/'):].partition('@')
+        revision = revision if separator else None
+    else:
+        checkpoint = Path(reference)
+        subfolder = None
+        revision = None
+    if revision is not None:
+        raise ConfigurationError('Revisions cannot be used with local embedding checkpoints')
+    if checkpoint.is_dir():
+        return checkpoint / (subfolder or '') / 'pytorch_model.bin'
+    return checkpoint
+
+
 def pipeline_fingerprint(settings: Settings) -> str:
     """Identify the pinned pipeline, embedding weights, and preprocessing."""
     path = Path(settings.pyannote_model)
@@ -65,9 +86,9 @@ def pipeline_fingerprint(settings: Settings) -> str:
         config_path = path / 'config.yaml' if path.is_dir() else path
         config_bytes = config_path.read_bytes()
         config = yaml.safe_load(config_bytes)
-        embedding = Path(config['pipeline']['params']['embedding'])
-        if not embedding.is_absolute():
-            embedding = config_path.parent / embedding
+        embedding = _local_embedding_checkpoint(
+            config['pipeline']['params']['embedding'], config_path.parent
+        )
         digest.update(config_bytes)
         with embedding.open('rb') as checkpoint:
             for chunk in iter(lambda: checkpoint.read(1024 * 1024), b''):
