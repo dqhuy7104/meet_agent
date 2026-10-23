@@ -22,6 +22,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'apps/api'))
 if TYPE_CHECKING:
     from app.core.audio_models import ModelRegistry
 
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+
 
 @dataclass(frozen=True)
 class ScoredProbe:
@@ -118,7 +120,11 @@ def evaluate_manifest(
     latencies = []
     for row in rows:
         started = perf_counter()
-        vector = extract_upload_embedding(row.audio_path.read_bytes(), models)
+        with row.audio_path.open('rb') as source:
+            audio = source.read(MAX_AUDIO_BYTES + 1)
+        if len(audio) > MAX_AUDIO_BYTES:
+            raise ValueError('Audio exceeds 25 MiB')
+        vector = extract_upload_embedding(audio, models)
         latencies.append(perf_counter() - started)
         if row.role == 'enrollment':
             samples = profiles.setdefault(row.person_id, [])
@@ -178,7 +184,8 @@ def main() -> None:
     except Exception:
         # File/model exceptions can contain private filenames, tokens or contents.
         parser.exit(1, 'Calibration failed: check manifest, local audio and pinned model configuration privately.\n')
-    report.update(dataset_version=args.dataset_version, model_id=settings.pyannote_model,
+    model_id = 'local-pipeline' if Path(settings.pyannote_model).exists() else settings.pyannote_model
+    report.update(dataset_version=args.dataset_version, model_id=model_id,
                   model_revision=settings.pyannote_revision, device=settings.model_device,
                   dependencies={name: version(name) for name in ('pyannote.audio', 'torch', 'numpy')})
     args.output.write_text(json.dumps(report, indent=2) + '\n')

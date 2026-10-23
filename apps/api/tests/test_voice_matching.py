@@ -42,6 +42,13 @@ class VoiceMatchingTest(unittest.TestCase):
                 self.assertIsNone(match_speakers({'SPEAKER_00': vector}, {'p': [[1., 0.]]}, .8, .1)['SPEAKER_00'])
         self.assertIsNone(normalize_embedding([float('inf')]))
 
+    def test_embedding_row_count_mismatch_is_structural_error(self) -> None:
+        annotation = Annotation()
+        annotation[Segment(0, 1)] = 'SPEAKER_00'
+        for rows in (np.empty((0, 2)), np.ones((2, 2))):
+            with self.subTest(rows=len(rows)), self.assertRaisesRegex(ValueError, '^Speaker embedding row count does not match diarization labels$'):
+                extract_speaker_embeddings(SimpleNamespace(speaker_diarization=annotation, speaker_embeddings=rows))
+
     def test_mean_threshold_and_margin(self) -> None:
         profiles = {'p': [[1., 0.], [0., 1.]], 'other': [[-1., 0.]]}
         result = match_speakers({'s': [1., 1.]}, profiles, .9, .1)['s']

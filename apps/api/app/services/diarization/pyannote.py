@@ -23,5 +23,5 @@ def extract_speaker_embeddings(result: Any) -> dict[str, list[float]]:
         return {}
     labels = annotation.labels()
     if len(rows) != len(labels):
-        return {}
+        raise ValueError("Speaker embedding row count does not match diarization labels")
     return {str(label): row.tolist() for label, row in zip(labels, rows)}

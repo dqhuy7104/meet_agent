@@ -79,6 +79,22 @@ class VoiceMeetingTest(PostgresTestCase):
                          ('completed', 'failed', 'Xin chào'))
 
     def test_malformed_embedding_extraction_preserves_transcript(self):
+        self.check_embedding_output([object()], 'failed')
+
+    def test_embedding_row_mismatch_preserves_transcript_and_fails_voice(self):
+        self.check_embedding_output([], 'failed')
+
+    def test_zero_and_nonfinite_centroids_complete_as_unknown(self):
+        import numpy as np
+        self.voices.add_sample(self.profile.id, [1.0, 0.0], 'v1', 'upload')
+        for index, vector in enumerate(([0., 0.], [float('nan'), 1.], [float('inf'), 1.])):
+            meeting_id = 'm1' if index == 0 else f'invalid-{index}'
+            if index:
+                self.add_meeting(meeting_id)
+            with self.subTest(vector=vector):
+                self.check_embedding_output(np.array([vector]), 'completed', meeting_id)
+
+    def check_embedding_output(self, rows, voice_status, meeting_id='m1'):
         from types import SimpleNamespace
         from apps.api.tests.test_audio_pipeline import FakeRegistry, _wav_bytes
         from app.services.audio.preprocess import SAMPLE_RATE
@@ -86,19 +102,24 @@ class VoiceMeetingTest(PostgresTestCase):
 
         models = FakeRegistry()
         models.annotation = SimpleNamespace(
-            speaker_diarization=models.annotation, speaker_embeddings=[object()])
-        part = self.repository.get_audio_files('m1')[0]
+            speaker_diarization=models.annotation, speaker_embeddings=rows)
+        part = self.repository.get_audio_files(meeting_id)[0]
         audio_path(self.data_dir, part.storage_key).write_bytes(_wav_bytes())
         with patch('app.services.meetings.worker.ModelRegistry', return_value=models), patch(
+                'app.services.meetings.worker.pipeline_fingerprint', return_value='v1'), patch(
                 'app.pipelines.meeting_pipeline.get_speech_timestamps',
                 return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(
                 models, 'get_asr', return_value=lambda audio: {'text': 'Xin chào'}):
             run_once_inline(self.repository, self.data_dir, self.settings, self.database)
-        meeting = self.repository.get_meeting('m1')
+        meeting = self.repository.get_meeting(meeting_id)
         self.assertEqual((meeting.status, meeting.voice_identification_status, meeting.transcript),
-                         ('completed', 'failed', 'Xin chào'))
-        self.assertEqual(self.repository.get_detail('m1').diarization_segments[0].speaker, 'SPEAKER_00')
-        self.assertEqual(self.voices.identities_for_meeting('m1'), [])
+                         ('completed', voice_status, 'Xin chào'))
+        self.assertEqual(self.repository.get_detail(meeting_id).diarization_segments[0].speaker, 'SPEAKER_00')
+        identities = self.voices.identities_for_meeting(meeting_id)
+        if voice_status == 'failed':
+            self.assertEqual(identities, [])
+        else:
+            self.assertEqual([identity.profile_id for identity in identities], [None])
         self.assertEqual(models.calls.count('diarization'), 1)
 
     def test_enrollment_does_not_reidentify_old_meeting(self):
