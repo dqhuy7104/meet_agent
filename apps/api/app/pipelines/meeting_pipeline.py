@@ -17,13 +17,15 @@ from app.services.voice.matching import normalize_embedding
 def process_audio(
     data: bytes, filename: str, models: ModelRegistry, *,
     speaker_embeddings: dict[str, list[float]] | None = None,
+    embedding_errors: list[str] | None = None,
 ) -> AudioProcessResponse:
     """Transcribe each speech region and retain original-audio timestamps.
 
     Language detection selects PhoWhisper or multilingual Whisper for each VAD
     region. A region with multiple
     diarized speakers receives the speaker with the most overlap; the complete
-    diarization turns remain available in the response.
+    diarization turns remain available in the response. Optional embedding errors
+    use safe codes in the internal sink and never interrupt transcription.
     """
     waveform = decode_audio(data)
     audio = torch.from_numpy(waveform)
@@ -46,10 +48,15 @@ def process_audio(
     result = diarization({"waveform": audio.unsqueeze(0), "sample_rate": SAMPLE_RATE})
     turns = diarization_turns(result)
     if speaker_embeddings is not None:
-        for label, values in extract_speaker_embeddings(result).items():
-            vector = normalize_embedding(values)
-            if vector is not None:
-                speaker_embeddings[label] = vector
+        try:
+            for label, values in extract_speaker_embeddings(result).items():
+                vector = normalize_embedding(values)
+                if vector is not None:
+                    speaker_embeddings[label] = vector
+        except Exception:
+            speaker_embeddings.clear()
+            if embedding_errors is not None:
+                embedding_errors.append("embedding_extraction_failed")
     language_detector = models.get_language()
     transcripts: list[TranscriptSegment] = []
     for part in timestamps:

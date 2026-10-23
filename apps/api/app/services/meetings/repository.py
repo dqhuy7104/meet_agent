@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Mapping
+
+from app.services.voice.matching import VoiceMatch
+from app.services.voice.repository import VoiceRepository
 
 import psycopg
 from psycopg.rows import dict_row
@@ -160,10 +163,13 @@ class MeetingRepository:
                 updated_at=now() WHERE status='processing'""")
 
     def _clear_results(self, meeting_id: str) -> None:
-        for table in ("rag_publications", "rag_index_jobs", "transcript_segments", "diarization_segments", "vad_segments"):
+        self.connection.execute("UPDATE meetings SET voice_identification_status='not_run' WHERE id=%s", (meeting_id,))
+        for table in ("meeting_speaker_identities", "rag_publications", "rag_index_jobs", "transcript_segments", "diarization_segments", "vad_segments"):
             self.connection.execute(f"DELETE FROM {table} WHERE meeting_id=%s", (meeting_id,))
 
-    def complete(self, meeting_id: str, result: AudioProcessResponse, durations: list[float] | None = None) -> None:
+    def complete(self, meeting_id: str, result: AudioProcessResponse, durations: list[float] | None = None,
+                 *, identities: Mapping[str, VoiceMatch | None] | None = None,
+                 voice_status: str = "not_run", voice_fingerprint: str | None = None) -> None:
         with self.connection.transaction():
             record = self._locked_meeting(meeting_id)
             if record is None or record.status != 'processing':
@@ -186,8 +192,20 @@ class MeetingRepository:
                 self.connection.execute("""INSERT INTO transcript_segments
                     (meeting_id,ordinal,start_seconds,end_seconds,speaker,text) VALUES (%s,%s,%s,%s,%s,%s)""",
                     (meeting_id, ordinal, segment.start, segment.end, segment.speaker, segment.text))
+            for speaker, match in sorted((identities or {}).items()):
+                profile_id = None
+                if match is not None:
+                    profile = self.connection.execute(
+                        "SELECT id FROM voice_profiles WHERE id=%s FOR KEY SHARE", (match.profile_id,)).fetchone()
+                    if profile is not None:
+                        profile_id = profile[0]
+                self.connection.execute("""INSERT INTO meeting_speaker_identities
+                    (meeting_id,speaker,profile_id,score,origin,fingerprint)
+                    VALUES (%s,%s,%s,%s,'automatic',%s)""",
+                    (meeting_id, speaker, profile_id, match.similarity if profile_id else None, voice_fingerprint))
             self.connection.execute("""UPDATE meetings SET status='completed',duration_seconds=%s,transcript=%s,
-                failure_code=NULL,updated_at=now() WHERE id=%s""", (result.duration_seconds, result.transcript, meeting_id))
+                failure_code=NULL,voice_identification_status=%s,updated_at=now() WHERE id=%s""",
+                (result.duration_seconds, result.transcript, voice_status, meeting_id))
             enqueue_rag_event(self.connection, meeting_id, "index")
 
     def fail(self, meeting_id: str, failure_code: str) -> None:
@@ -213,6 +231,7 @@ class MeetingRepository:
                 tuple(part.storage_key for part in self.get_audio_files(meeting_id) if part.ordinal > 0))
             if record.status != 'cancelled':
                 self._clear_results(meeting_id)
+                VoiceRepository(self.connection).purge_meeting_source(meeting_id)
                 self.connection.execute("DELETE FROM meeting_audio_files WHERE meeting_id=%s", (meeting_id,))
                 self.connection.execute("""UPDATE meetings SET status='cancelled',failure_code=NULL,duration_seconds=NULL,
                     transcript=NULL,cancelled_at=now(),updated_at=now() WHERE id=%s""", (meeting_id,))
@@ -273,6 +292,7 @@ class MeetingRepository:
                 return None
             if record.status == 'processing':
                 raise MeetingStateConflict(meeting_id)
+            VoiceRepository(self.connection).purge_meeting_source(meeting_id)
             self.connection.execute("DELETE FROM meetings WHERE id=%s", (meeting_id,))
             enqueue_rag_event(self.connection, meeting_id, "purge")
             return record.storage_key

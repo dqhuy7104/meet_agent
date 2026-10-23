@@ -11,6 +11,15 @@ from psycopg.rows import class_row
 
 
 @dataclass(frozen=True)
+class SpeakerIdentity:
+    speaker: str
+    profile_id: str | None
+    display_name: str | None
+    similarity: float | None
+    origin: str
+
+
+@dataclass(frozen=True)
 class VoiceProfile:
     id: str
     display_name: str
@@ -209,3 +218,37 @@ class VoiceRepository:
             state=CASE WHEN attempt_count<2 THEN 'queued' ELSE 'failed' END,
             failure_code=CASE WHEN attempt_count<2 THEN NULL ELSE 'interrupted' END,
             pipeline_pid=NULL,pipeline_start_ticks=NULL,updated_at=now() WHERE state='processing'""")
+
+    def identities_for_meeting(self, meeting_id: str) -> list[SpeakerIdentity]:
+        with self.connection.cursor(row_factory=class_row(SpeakerIdentity)) as cursor:
+            return cursor.execute("""SELECT i.speaker,i.profile_id,p.display_name,i.score AS similarity,i.origin
+                FROM meeting_speaker_identities i LEFT JOIN voice_profiles p ON p.id=i.profile_id
+                WHERE i.meeting_id=%s ORDER BY i.speaker""", (meeting_id,)).fetchall()
+
+    def set_meeting_identity(self, meeting_id: str, speaker: str, profile_id: str | None) -> SpeakerIdentity:
+        from app.services.meetings.repository import MeetingStateConflict
+        with self.connection.transaction():
+            meeting = self.connection.execute(
+                "SELECT status FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,)).fetchone()
+            if meeting is None:
+                raise LookupError("Meeting not found")
+            if meeting[0] != 'completed' or not self.connection.execute(
+                "SELECT 1 FROM diarization_segments WHERE meeting_id=%s AND speaker=%s",
+                (meeting_id, speaker)).fetchone():
+                raise MeetingStateConflict(meeting_id)
+            if profile_id is not None and not self.connection.execute(
+                "SELECT id FROM voice_profiles WHERE id=%s FOR KEY SHARE", (profile_id,)).fetchone():
+                raise LookupError("Voice profile not found")
+            self.connection.execute("""INSERT INTO meeting_speaker_identities
+                (meeting_id,speaker,profile_id,origin) VALUES (%s,%s,%s,'manual')
+                ON CONFLICT (meeting_id,speaker) DO UPDATE SET profile_id=EXCLUDED.profile_id,
+                origin='manual',score=NULL,fingerprint=NULL""", (meeting_id, speaker, profile_id))
+            return next(identity for identity in self.identities_for_meeting(meeting_id) if identity.speaker == speaker)
+
+    def purge_meeting_source(self, meeting_id: str) -> None:
+        with self.connection.transaction():
+            self.connection.execute("SELECT id FROM meetings WHERE id=%s FOR UPDATE", (meeting_id,))
+            self.connection.execute("DELETE FROM voice_samples WHERE source_meeting_id=%s", (meeting_id,))
+            self.connection.execute("DELETE FROM meeting_speaker_identities WHERE meeting_id=%s", (meeting_id,))
+            self.connection.execute("""UPDATE voice_enrollment_jobs SET state='failed',failure_code='source_changed',
+                updated_at=now() WHERE source_meeting_id=%s AND state IN ('queued','processing')""", (meeting_id,))

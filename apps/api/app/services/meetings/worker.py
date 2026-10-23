@@ -21,7 +21,7 @@ from app.db.worker_locks import WorkerLease, worker_lease
 import psycopg
 from app.services.voice.repository import VoiceRepository
 from app.services.voice.enrollment import EnrollmentError, extract_upload_embedding, extract_meeting_embedding
-from app.services.voice.matching import pipeline_fingerprint
+from app.services.voice.matching import pipeline_fingerprint, match_speakers
 from app.services.meetings.storage import initialize_meeting_storage
 from app.pipelines.meeting_pipeline import process_audio
 from app.services.audio.preprocess import AudioTooLongError, InvalidAudioError
@@ -75,9 +75,31 @@ def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, dat
             return
         try:
             parts = repository.get_audio_files(meeting_id)
-            result, durations = process_meeting_parts(parts, data_dir, ModelRegistry(settings), meeting.source)
+            embeddings = {} if settings.voice_identification_enabled else None
+            embedding_errors: list[str] = []
+            result, durations = process_meeting_parts(
+                parts, data_dir, ModelRegistry(settings), meeting.source,
+                speaker_embeddings=embeddings, embedding_errors=embedding_errors)
+            identities, fingerprint = None, None
+            voice_status = "disabled"
+            if embeddings is not None:
+                try:
+                    if embedding_errors:
+                        raise ValueError("embedding_extraction_failed")
+                    fingerprint = pipeline_fingerprint(settings)
+                    profiles = VoiceRepository(connection).profile_embeddings(fingerprint)
+                    identities = match_speakers(embeddings, profiles,
+                        settings.voice_match_min_cosine, settings.voice_match_min_margin)
+                    for segment in result.diarization_segments:
+                        identities.setdefault(segment.speaker, None)
+                    voice_status = "completed"
+                except Exception:
+                    identities, fingerprint = None, None
+                    voice_status = "failed"
+                    logger.warning("Meeting %s voice identification failed", meeting.id)
             if ownership_event.is_set():
-                repository.complete(meeting.id, result, durations)
+                repository.complete(meeting.id, result, durations, identities=identities,
+                                    voice_status=voice_status, voice_fingerprint=fingerprint)
         except psycopg.Error:
             logger.warning("Meeting database unavailable")
             raise SystemExit(1) from None
@@ -141,7 +163,8 @@ def run_claimed_enrollment(job_id: str, data_dir: Path, settings: Settings, data
 
 def process_meeting_parts(
     parts: list[MeetingAudioFile], data_dir: Path, models: ModelRegistry,
-    source: str = "upload",
+    source: str = "upload", speaker_embeddings: dict[str, list[float]] | None = None,
+    embedding_errors: list[str] | None = None,
 ) -> tuple[AudioProcessResponse, list[float]]:
     """Process ordered recordings and shift segments to meeting time."""
     if not parts:
@@ -155,7 +178,12 @@ def process_meeting_parts(
     transcript_segments: list[TranscriptSegment] = []
     for part in parts:
         data = audio_path(data_dir, part.storage_key).read_bytes()
-        result = process_audio(data, part.original_filename, models)
+        part_embeddings = {} if speaker_embeddings is not None else None
+        if part_embeddings is None:
+            result = process_audio(data, part.original_filename, models)
+        else:
+            result = process_audio(data, part.original_filename, models,
+                                   speaker_embeddings=part_embeddings, embedding_errors=embedding_errors)
         if result.duration_seconds > 30 * 60:
             raise AudioTooLongError("Audio part must be at most 30 minutes long")
         part_start = part.start_seconds if source == "google_meet_bot" else offset
@@ -164,6 +192,8 @@ def process_meeting_parts(
         if source == "upload" and offset + result.duration_seconds > 30 * 60:
             raise AudioTooLongError("Meeting audio must be at most 30 minutes long")
         speaker_prefix = f"PART_{part.ordinal + 1}_" if part.ordinal else ""
+        if speaker_embeddings is not None:
+            speaker_embeddings.update({speaker_prefix + label: vector for label, vector in part_embeddings.items()})
         vad_segments.extend(segment.model_copy(update={
             "start": segment.start + part_start, "end": segment.end + part_start,
         }) for segment in result.vad_segments)
