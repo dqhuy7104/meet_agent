@@ -13,4 +13,7 @@
 .rag-results p, .rag-answer { white-space: pre-wrap; line-height: 1.65; }
 .rag-results a { color: #2160a5; text-decoration: underline; }
 .rag-status { display: block; margin-top: 12px; }
+.app[data-theme="dark"] .rag-form textarea, .app[data-theme="dark"] .rag-form select, .app[data-theme="dark"] .rag-form input { background: #36393e; border-color: #424549; color: #e8eaed; }
+.app[data-theme="dark"] .rag-page :focus-visible { outline-color: #7289da; }
+.app[data-theme="dark"] .rag-results a { color: #7289da; }
 @media (max-width: 640px) { .rag-controls { grid-template-columns: 1fr; } .rag-form, .rag-results { padding: 16px; } }

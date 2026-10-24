@@ -1,1 +1,87 @@
-services: {}
+x-backend: &backend
+  image: meeting-ai-api:local
+  build:
+    context: .
+    dockerfile: apps/api/Dockerfile
+  env_file: .env
+  environment:
+    MEETING_DATA_DIR: /data
+    HF_HOME: /cache/huggingface
+    TORCH_HOME: /cache/torch
+    XDG_CACHE_HOME: /cache
+  volumes:
+    - postgres-meeting-data:/data
+    - model-cache:/cache
+  network_mode: host
+  init: true
+  restart: "no"
+
+services:
+  database:
+    image: pgvector/pgvector:0.8.1-pg17
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-meeting}
+      POSTGRES_USER: ${POSTGRES_USER:-meeting}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD locally}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-55432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+
+  migrate:
+    <<: *backend
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.db.migrate"]
+    restart: "no"
+    depends_on:
+      database:
+        condition: service_healthy
+
+  api:
+    <<: *backend
+    command: ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-access-log"]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "uv", "run", "--no-sync", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/openapi.json', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+
+  worker:
+    <<: *backend
+    command: ["uv", "run", "--no-sync", "python", "-m", "app.services.meetings.worker"]
+    pid: service:api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      api:
+        condition: service_healthy
+    stop_grace_period: 60s
+
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+    network_mode: host
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:5173/app/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  postgres-meeting-data:
+  postgres-data:
+  model-cache:

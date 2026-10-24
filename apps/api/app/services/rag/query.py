@@ -5,6 +5,7 @@ from app.services.rag.answering import generate_answer, insufficient
 from app.services.rag.chunking import estimate_tokens, snapshot_meeting
 from app.services.rag.prompt import build_messages
 from app.services.rag.ranking import rank_candidates, select_context
+from app.services.llm.summarizer import PROMPT_VERSION as SUMMARY_PROMPT_VERSION, summarize_transcript
 
 
 class QueryService:
@@ -14,6 +15,23 @@ class QueryService:
     def eligible(self, chunk) -> bool:
         detail = self.meetings.get_detail(chunk.meeting_id)
         return bool(detail and detail.meeting.status == 'completed' and snapshot_meeting(detail).revision == chunk.revision)
+
+    async def summarize(self, meeting_id: str) -> dict[str, str]:
+        detail = self.meetings.get_detail(meeting_id)
+        if detail is None:
+            raise RagError('meeting_not_found', 404)
+        if detail.meeting.status != 'completed':
+            raise RagError('meeting_not_completed', 409)
+        provider = next((item for item in self.settings.providers if item.chat_models), None)
+        if provider is None:
+            raise RagError('chat_provider_not_configured')
+        selection = self.registry.resolve_chat(provider.id, provider.chat_models[0].id)
+        summary = await summarize_transcript(detail.transcript_segments, selection, self.client)
+        current = self.meetings.get_detail(meeting_id)
+        if current is None or current.meeting.status != 'completed' or snapshot_meeting(current).revision != snapshot_meeting(detail).revision:
+            raise RagError('meeting_changed', 409)
+        return dict(summary=summary, provider_id=provider.id, model_id=selection.model.id,
+                    prompt_version=SUMMARY_PROMPT_VERSION)
 
     async def ready(self, profile_id: str) -> bool:
         await self.rag.call('validate_profile', self.registry.resolve_profile(profile_id))

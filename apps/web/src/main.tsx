@@ -5,5 +5,6 @@ import App from "./App";
 import "./styles.css";
 import "./light.css";
 import "./geometry.css";
+import "./dark.css";
 
 createRoot(document.getElementById("root")!).render(<StrictMode><BrowserRouter basename="/app"><App /></BrowserRouter></StrictMode>);

@@ -97,7 +97,7 @@ export function MeetBotPanel() {
             <input maxLength={200} value={title} onChange={(event) => setTitle(event.target.value)} />
           </label>
           <p>Hãy thông báo cho người tham gia rằng bot sẽ ghi âm. Host có thể cần duyệt bot vào phòng.</p>
-          <button className="primary" type="submit" disabled={busy}>{busy ? "Đang gửi..." : "Cho bot tham gia"}</button>
+          <button className="primary" type="submit" disabled={busy}>{busy ? "Đang gửi..." : "Thêm Bot"}</button>
         </form>
       )}
       {session && (

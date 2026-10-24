@@ -1,0 +1,22 @@
+.app[data-theme="dark"] .primary,
+.app[data-theme="dark"] .voice-page .primary,
+.app[data-theme="dark"] .controls .play,
+.app[data-theme="dark"] .transcript mark {
+  color: #1e2124;
+}
+
+.app[data-theme="dark"] .panel-head a,
+.app[data-theme="dark"] .voice-identities a,
+.app[data-theme="dark"] code,
+.app[data-theme="dark"] .rag-results a {
+  color: #aab3ff;
+}
+
+.app[data-theme="dark"] .overlay {
+  background: #1e2124bb;
+}
+
+.app[data-theme="dark"] :focus-visible {
+  outline: 2px solid #7289da;
+  outline-offset: 3px;
+}

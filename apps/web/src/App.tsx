@@ -38,6 +38,7 @@ import { speakerDisplay } from "./lib/voiceDisplay";
 import { MeetBotPanel } from "./components/MeetBotPanel";
 import { MeetingSearchChat } from "./components/MeetingSearchChat";
 import { findAudioPartAtTime } from "./lib/timeline";
+import { speakerLabels } from "./lib/speakers";
 import type { ApiMeeting, MeetingStatus } from "./types/meeting";
 
 const labels: Record<MeetingStatus, string> = {
@@ -73,7 +74,7 @@ function Shell({ children }: { children: ReactNode }) {
   const navigation = [
     ["/", "Tổng quan", LayoutDashboard],
     ["/meetings", "Cuộc họp", FileAudio],
-    ["/chat", "Hỏi từ cuộc họp", Search],
+    ["/chat", "Tìm kiếm thông tin", Search],
     ["/voice-profiles", "Hồ sơ giọng nói", FileAudio],
     ["/settings", "Cài đặt", Settings],
   ] as const;
@@ -277,7 +278,7 @@ function Dashboard() {
           </p>
         </div>
         <NavLink className="primary" to="/meetings">
-          <UploadIcon size={17} /> Tải bản ghi lên
+          <UploadIcon size={17} />Tải bản ghi
         </NavLink>
       </section>
       <section className="stats">
@@ -535,6 +536,10 @@ function LocalWorkspace({ id }: { id: string }) {
   const [deleteError, setDeleteError] = useState("");
   const [isDeleting, setIsDeleting] = useState(false);
   const [query, setQuery] = useState("");
+  const [summary, setSummary] = useState("");
+  const [summaryError, setSummaryError] = useState("");
+  const [isSummaryLoading, setIsSummaryLoading] = useState(false);
+  const [summaryAttempt, setSummaryAttempt] = useState(0);
   const navigate = useNavigate();
   const audios = useRef<(HTMLAudioElement | null)[]>([]);
   const load = useCallback(
@@ -571,6 +576,30 @@ function LocalWorkspace({ id }: { id: string }) {
       clearTimeout(timer);
     };
   }, [load]);
+  useEffect(() => {
+    if (meeting?.id !== id || meeting.status !== "completed") return;
+    if (!meeting.transcript_segments.some((segment) => segment.text.trim())) {
+      setSummary("");
+      setSummaryError("");
+      return;
+    }
+    const controller = new AbortController();
+    setSummary("");
+    setSummaryError("");
+    setIsSummaryLoading(true);
+    void meetingApi.summary(meeting.id, controller.signal).then((result) => {
+      if (!controller.signal.aborted) setSummary(result.summary);
+    }).catch((cause) => {
+      if (controller.signal.aborted) return;
+      const code = cause instanceof ApiError ? cause.message : "";
+      setSummaryError(code === "rag_disabled" || code === "chat_provider_not_configured"
+        ? "Chưa cấu hình chat model cho RAG."
+        : "Không tạo được tóm tắt. Vui lòng thử lại.");
+    }).finally(() => {
+      if (!controller.signal.aborted) setIsSummaryLoading(false);
+    });
+    return () => controller.abort();
+  }, [id, meeting?.id, meeting?.status, summaryAttempt]);
   const seek = useCallback((seconds: number, shouldPlay = true) => {
     const parts = meeting?.audio_files ?? [];
     let uploadOffset = 0;
@@ -621,7 +650,7 @@ function LocalWorkspace({ id }: { id: string }) {
         <LibraryError message={error} retry={() => void load()} />
       </div>
     );
-  if (!meeting)
+  if (!meeting || meeting.id !== id)
     return (
       <div className="page">
         <div className="empty">
@@ -634,6 +663,7 @@ function LocalWorkspace({ id }: { id: string }) {
     (segment) =>
       !query || segment.text.toLowerCase().includes(query.toLowerCase()),
   );
+  const speakers = speakerLabels(meeting.diarization_segments);
   return (
     <div className="page workspace">
       <section className="work-title">
@@ -741,12 +771,8 @@ function LocalWorkspace({ id }: { id: string }) {
           </section>
           <aside className="insight">
             <div className="ai">
-              <span>
-                <Sparkles size={16} />
-              </span>
               <div>
-                <small>BACKEND DATA</small>
-                <h3>Speech & speakers</h3>
+                <h1>Thông tin tóm tắt</h1>
               </div>
             </div>
             <div className="insight-body">
@@ -759,9 +785,13 @@ function LocalWorkspace({ id }: { id: string }) {
               />
               <h4>Diarization</h4>
               <p>
-                {meeting.diarization_segments.length} speaker turn được backend
-                trả về, gồm cả các đoạn chồng lấp.
+                {speakers.length} người nói{speakers.length ? `: ${speakers.join(", ")}` : " được phát hiện"}.
               </p>
+            </div>
+            <div className="insight-body">
+              <h3>Nội dung cuộc họp</h3>
+              <p aria-live="polite">{isSummaryLoading ? "Đang tạo tóm tắt…" : summary || summaryError || "Không có nội dung lời nói để tóm tắt."}</p>
+              {summaryError && <button className="primary" type="button" onClick={() => setSummaryAttempt((attempt) => attempt + 1)}>Thử lại</button>}
             </div>
           </aside>
         </div>
@@ -774,24 +804,8 @@ function SettingsPage() {
     <div className="page">
       <section className="title">
         <div>
-          <small>PREFERENCES</small>
           <h2>Cài đặt workspace</h2>
-          <p>Quyền riêng tư được ưu tiên cho các bản ghi họp.</p>
         </div>
-      </section>
-      <section className="panel setting">
-        <h3>Nguồn dữ liệu</h3>
-        <p>
-          Giao diện chỉ hiển thị dữ liệu từ endpoint local{" "}
-          <code>/api/meetings</code>.
-        </p>
-      </section>
-      <section className="panel setting">
-        <h3>Quyền riêng tư</h3>
-        <p>
-          Không lưu audio hoặc transcript trong browser storage. API local chỉ
-          nên chạy trên loopback.
-        </p>
       </section>
     </div>
   );

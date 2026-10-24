@@ -49,6 +49,13 @@ class RagAnswer(StrictModel):
     citations: list[Citation] = Field(default_factory=list)
 
 
+class MeetingSummary(StrictModel):
+    summary: str
+    provider_id: str
+    model_id: str
+    prompt_version: str
+
+
 class ProviderChoice(StrictModel):
     id: str
     name: str

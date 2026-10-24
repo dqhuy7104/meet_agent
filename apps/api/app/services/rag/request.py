@@ -29,7 +29,7 @@ class RagRequestService:
         self.registry = ProviderRegistry(settings)
 
     async def _invoke(self, action: str, *arguments):
-        deadline = RequestDeadline()
+        deadline = RequestDeadline(expires_at=time.monotonic() + (180 if action == 'summarize' else 60))
         executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix='rag-request')
         future = executor.submit(self._serve, deadline, action, arguments)
         try:
@@ -93,6 +93,9 @@ class RagRequestService:
         if request.k > self.settings.max_k:
             raise RagError('invalid_k', 422)
         return await self._invoke('query', request)
+
+    async def summarize(self, meeting_id: str) -> dict[str, str]:
+        return await self._invoke('summarize', meeting_id)
 
     async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str):
         return await self._invoke('evaluation_state', profile_id, provider_id, model_id)

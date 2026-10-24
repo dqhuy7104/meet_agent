@@ -58,6 +58,12 @@ class VoiceMatchingTest(unittest.TestCase):
                                                ({'p': [[1., 0.]], 'q': [[1., .01]]}, .8, .1)):
             self.assertIsNone(match_speakers({'s': [1., 0.]}, candidates, threshold, margin)['s'])
 
+    def test_invalid_profile_sample_does_not_hide_valid_sample(self) -> None:
+        profiles = {'known': [[float('nan'), 0.], [1., 0.]], 'other': [[0., 1.]]}
+        match = match_speakers({'speaker': [1., 0.]}, profiles, .8, .1)['speaker']
+        self.assertEqual(match.profile_id, 'known')
+        self.assertAlmostEqual(match.similarity, 1.)
+
     def test_fingerprint_pins_remote_revision_and_local_checkpoint(self) -> None:
         with self.assertRaises(ConfigurationError):
             pipeline_fingerprint(Settings())

@@ -97,6 +97,21 @@ class VoiceJobsTest(PostgresTestCase):
                 self.assertEqual(stored.failure_code, 'processing_error' if should_fail else None)
                 self.assertFalse(audio_path(self.data_dir, job.storage_key).exists())
 
+    def test_missing_upload_fails_without_publishing_sample(self):
+        from app.services.meetings import worker
+
+        job = self.upload()
+        self.voices.claim_next_job()
+        audio_path(self.data_dir, job.storage_key).unlink()
+        started, owned = threading.Event(), threading.Event()
+        started.set()
+        owned.set()
+        with patch.object(worker, 'pipeline_fingerprint', return_value='fingerprint'):
+            worker.run_claimed_enrollment(job.id, self.data_dir, Settings(), self.database, started, owned)
+        stored = self.voices.get_job(job.id)
+        self.assertEqual((stored.status, stored.failure_code), ('failed', 'processing_error'))
+        self.assertEqual(self.voices.list_samples(self.profile.id), [])
+
     def test_profile_and_source_deletion_preserve_failed_job_status(self):
         job = self.upload()
         self.voices.delete_profile(self.profile.id)

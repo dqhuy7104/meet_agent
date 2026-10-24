@@ -41,7 +41,7 @@ export function MeetingSearchChat(){
   }
   const embeddingProvider=catalog?.providers.find(p=>p.id===catalog.embedding_profiles.find(p=>p.id===input.embedding_profile_id)?.provider_id);
   return <div className="page rag-page">
-    <section className="title"><div><small>MEETING LIBRARY</small><h2>Hỏi từ cuộc họp</h2><p>Tìm bằng chứng trong tối đa K cuộc họp, kèm nguồn và thời gian.</p></div></section>
+    <section className="title"><div><small>MEETING LIBRARY</small><h2>Tìm kiếm thông tin</h2><p>Tìm bằng chứng trong tối đa K cuộc họp, kèm nguồn và thời gian.</p></div></section>
     <form className="panel rag-form" onSubmit={event=>void submit(event)} aria-busy={isLoading}>
       <fieldset disabled={isLoading}><legend>Câu hỏi và nguồn tìm kiếm</legend>
         <label htmlFor="rag-question">Câu hỏi</label><textarea ref={question} id="rag-question" value={input.question} maxLength={2000} rows={4} onChange={e=>setInput({...input,question:e.target.value})} required/>

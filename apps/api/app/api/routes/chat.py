@@ -1,15 +1,17 @@
 """Loopback-only RAG endpoints with safe error bodies."""
 import asyncio
-from fastapi import APIRouter, Depends, Request
+from typing import Annotated
+from fastapi import APIRouter, Depends, Path, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from app.api.deps import get_rag_service
 from app.api.routes.meetings import require_loopback
 from app.core.rag_config import RagError
-from app.schemas.chat import ProviderCatalog, RagAnswer, RagQuery, EvaluationState
+from app.schemas.chat import ProviderCatalog, RagAnswer, RagQuery, EvaluationState, MeetingSummary
 
 QUERY_TIMEOUT_SECONDS = 60
+SUMMARY_TIMEOUT_SECONDS = 190
 
 
 class SafeRagRoute(APIRoute):
@@ -17,7 +19,8 @@ class SafeRagRoute(APIRoute):
         handler = super().get_route_handler()
         async def safe(request: Request):
             try:
-                return await asyncio.wait_for(handler(request), timeout=QUERY_TIMEOUT_SECONDS)
+                timeout = SUMMARY_TIMEOUT_SECONDS if request.url.path.endswith('/summary') else QUERY_TIMEOUT_SECONDS
+                return await asyncio.wait_for(handler(request), timeout=timeout)
             except RequestValidationError:
                 return JSONResponse(status_code=422, content={'detail': 'invalid_query'})
             except RagError as error:
@@ -39,6 +42,12 @@ async def providers(service=Depends(get_rag_service)) -> ProviderCatalog:
 @router.post('/queries', response_model=RagAnswer)
 async def query(request: RagQuery, service=Depends(get_rag_service)) -> RagAnswer:
     return await service.query(request)
+
+
+@router.post('/meetings/{meeting_id}/summary', response_model=MeetingSummary)
+async def meeting_summary(meeting_id: Annotated[str, Path(min_length=1, max_length=200)],
+                          service=Depends(get_rag_service)) -> MeetingSummary:
+    return MeetingSummary.model_validate(await service.summarize(meeting_id))
 
 
 @router.get('/evaluation-state', response_model=EvaluationState)

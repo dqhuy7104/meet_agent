@@ -54,6 +54,12 @@ class EnrollmentTests(unittest.TestCase):
         vector = extract_upload_embedding(audio(), Models([(0, 10, 'A')]))
         np.testing.assert_allclose(vector, [.6, .8])
 
+    def test_upload_counts_fragmented_exclusive_speech_at_ten_second_boundary(self):
+        vector = extract_upload_embedding(audio(), Models([(0, 4, 'A'), (5, 11, 'A')]))
+        np.testing.assert_allclose(vector, [.6, .8])
+        self.assert_code('insufficient_speech', lambda: extract_upload_embedding(
+            audio(), Models([(0, 4, 'A'), (5, 10.99, 'A')])))
+
     def test_upload_rejects_two_speakers_short_speech_or_invalid_audio(self):
         for turns, code in [([(0, 10, 'A'), (10, 11, 'B')], 'multiple_speakers'),
                             ([(0, 9.99, 'A')], 'insufficient_speech'), ([], 'insufficient_speech')]:
