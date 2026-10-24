@@ -13,4 +13,4 @@ meeting-data/
 ai_training/datasets/*
 ai_training/results/*
 !ai_training/results/.gitkeep
-docs/*
+docs
