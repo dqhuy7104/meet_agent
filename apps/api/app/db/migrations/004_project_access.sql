@@ -48,13 +48,16 @@ CREATE INDEX voice_enrollment_jobs_project ON voice_enrollment_jobs(project_id, 
 
 CREATE FUNCTION reject_new_legacy_unassigned() RETURNS trigger LANGUAGE plpgsql AS $$
 BEGIN
-    IF NEW.legacy_unassigned THEN
+    IF TG_OP = 'INSERT' AND NEW.legacy_unassigned THEN
+        RAISE check_violation USING MESSAGE = 'new rows require a project';
+    END IF;
+    IF TG_OP = 'UPDATE' AND NEW.legacy_unassigned AND NOT OLD.legacy_unassigned THEN
         RAISE check_violation USING MESSAGE = 'new rows require a project';
     END IF;
     RETURN NEW;
 END;
 $$;
-CREATE TRIGGER meetings_reject_new_legacy BEFORE INSERT ON meetings
+CREATE TRIGGER meetings_reject_new_legacy BEFORE INSERT OR UPDATE ON meetings
     FOR EACH ROW EXECUTE FUNCTION reject_new_legacy_unassigned();
-CREATE TRIGGER bot_sessions_reject_new_legacy BEFORE INSERT ON bot_sessions
+CREATE TRIGGER bot_sessions_reject_new_legacy BEFORE INSERT OR UPDATE ON bot_sessions
     FOR EACH ROW EXECUTE FUNCTION reject_new_legacy_unassigned();

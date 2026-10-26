@@ -51,6 +51,24 @@ class AccessRepositoryTest(PostgresTestCase):
 
 
 class ProjectMigrationUpgradeTest(unittest.TestCase):
+    def test_new_project_rows_cannot_become_legacy_unassigned_on_update(self) -> None:
+        with isolated_postgres() as fixture:
+            from app.services.access.repository import AccessRepository
+            project = AccessRepository(fixture.connection).create_project('First')
+            fixture.connection.execute(
+                "INSERT INTO meetings (id,original_filename,storage_key,checksum,created_at,updated_at,status,project_id) "
+                "VALUES ('new','new.wav',%s,'hash',now(),now(),'queued',%s)", ('b'*32, project.id)
+            )
+            fixture.connection.execute(
+                "INSERT INTO bot_sessions (id,url_hash,status,created_at,project_id) "
+                "VALUES ('new-bot','hash','queued',now(),%s)", (project.id,)
+            )
+            for table, row_id in (('meetings', 'new'), ('bot_sessions', 'new-bot')):
+                with self.subTest(table=table), self.assertRaises(psycopg.errors.CheckViolation):
+                    fixture.connection.execute(
+                        f"UPDATE {table} SET legacy_unassigned=true, project_id=NULL WHERE id=%s", (row_id,)
+                    )
+
     def test_old_rows_remain_unassigned_and_mutable_but_new_rows_require_projects(self) -> None:
         definitions = migration_definitions()
         with isolated_postgres(migrate=False) as fixture:
