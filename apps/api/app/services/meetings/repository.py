@@ -64,6 +64,9 @@ class MeetingRecord:
     cancelled_at: str | None
     source: str
     voice_identification_status: str = "not_run"
+    project_id: str | None = None
+    uploaded_by_account_id: str | None = None
+    legacy_unassigned: bool = False
 
 
 @dataclass(frozen=True)

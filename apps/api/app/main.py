@@ -30,3 +30,8 @@ async def storage_unavailable(request, error: DatabaseUnavailableError) -> JSONR
 @app.exception_handler(psycopg.Error)
 async def database_unavailable(request, error: psycopg.Error) -> JSONResponse:
     return JSONResponse(status_code=503, content={"detail": "database_unavailable"})
+
+from app.api.routes.projects import router as projects_router
+from app.api.routes.admin import router as admin_router
+app.include_router(projects_router, prefix='/api')
+app.include_router(admin_router, prefix='/api')

@@ -141,3 +141,41 @@ class AccessRepository:
         ).fetchone()[0]
         if count <= 1:
             raise ValueError('Cannot remove the last project manager')
+
+    def accounts(self) -> list[Account]:
+        return [Account(*row) for row in self.connection.execute(
+            'SELECT id,email,is_system_admin,is_disabled FROM accounts ORDER BY email,id')]
+
+    def members(self, project_id: str) -> list[Membership]:
+        return [Membership(*row) for row in self.connection.execute(
+            'SELECT project_id,account_id,role FROM project_memberships WHERE project_id=%s ORDER BY account_id',
+            (project_id,))]
+
+    def update_project(self, project_id: str, *, name: str | None = None,
+                       is_archived: bool | None = None) -> Project:
+        row = self.connection.execute('UPDATE projects SET name=COALESCE(%s,name), '
+            'is_archived=COALESCE(%s,is_archived) WHERE id=%s RETURNING id,name,is_archived',
+            (name.strip() if name else None, is_archived, project_id)).fetchone()
+        return Project(*row)
+
+    def update_account(self, account_id: str, *, is_system_admin: bool | None = None,
+                       is_disabled: bool | None = None) -> Account | None:
+        from app.services.access.sessions import SessionRepository
+        with self.connection.transaction():
+            # Serialize administrator-count decisions and login's account row lock.
+            self.connection.execute("SELECT pg_advisory_xact_lock(hashtext('meeting-account-administration'))")
+            row = self.connection.execute('SELECT id,email,is_system_admin,is_disabled FROM accounts '
+                                          'WHERE id=%s FOR UPDATE', (account_id,)).fetchone()
+            if row is None:
+                return None
+            current = Account(*row)
+            if current.is_system_admin and not current.is_disabled and (is_system_admin is False or is_disabled is True):
+                count = self.connection.execute('SELECT count(*) FROM accounts WHERE is_system_admin AND NOT is_disabled').fetchone()[0]
+                if count <= 1:
+                    raise ValueError('Cannot remove the last system administrator')
+            row = self.connection.execute('UPDATE accounts SET is_system_admin=COALESCE(%s,is_system_admin), '
+                'is_disabled=COALESCE(%s,is_disabled) WHERE id=%s RETURNING id,email,is_system_admin,is_disabled',
+                (is_system_admin, is_disabled, account_id)).fetchone()
+            if is_disabled:
+                SessionRepository(self.connection).revoke_account(account_id)
+            return Account(*row)
