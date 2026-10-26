@@ -72,12 +72,13 @@ def register(body: Credentials, request: Request, response: Response, repository
 
 @router.post('/login', response_model=SessionResponse, dependencies=[Depends(rate_limit)])
 def login(body: LoginCredentials, request: Request, response: Response, repository: Repository):
-    row = repository.connection.execute('SELECT password_hash FROM accounts WHERE email=%s', (body.email,)).fetchone()
-    valid = verify_password(body.password, row[0] if row else _dummy_hash)
-    account = AccessRepository(repository.connection).account_by_email(body.email)
-    if not valid or account is None or account.is_disabled:
-        raise HTTPException(401, 'Invalid email or password')
-    return issue_session(request, response, repository, account)
+    with repository.connection.transaction():
+        row = repository.connection.execute('SELECT password_hash FROM accounts WHERE email=%s FOR UPDATE', (body.email,)).fetchone()
+        valid = verify_password(body.password, row[0] if row else _dummy_hash)
+        account = AccessRepository(repository.connection).account_by_email(body.email)
+        if not valid or account is None or account.is_disabled:
+            raise HTTPException(401, 'Invalid email or password')
+        return issue_session(request, response, repository, account)
 
 
 @router.get('/session', response_model=SessionResponse)

@@ -75,3 +75,51 @@ class AuthRoutesTest(PostgresAsyncTestCase):
                 self.assertIn('Secure', response.headers['set-cookie'])
                 insecure = await self.client.post('/api/auth/login', json={'email':'secure@example.com','password':'correct-password'})
                 self.assertEqual(insecure.status_code, 403)
+
+    async def test_concurrent_password_change_revokes_old_password_login(self):
+        from concurrent.futures import ThreadPoolExecutor
+        import psycopg
+        from threading import Event, current_thread
+        import time
+        from unittest.mock import patch
+        from fastapi import Request, Response
+        from app.api.routes import auth
+        from app.schemas.auth import LoginCredentials, PasswordChange
+        from app.services.access.repository import AccessRepository
+        from app.services.access.sessions import SessionRepository
+
+        await self.register()
+        account = AccessRepository(self.connection).account_by_email('ada@example.com')
+        password_read = Event()
+        continue_login = Event()
+        original_verify = auth.verify_password
+
+        def pause_login(password, encoded):
+            if current_thread().name.startswith('paused-login'):
+                password_read.set()
+                if not continue_login.wait(10):
+                    raise AssertionError('Login was never released')
+            return original_verify(password, encoded)
+
+        request = Request({'type':'http', 'scheme':'http', 'headers':[], 'server':('localhost',80), 'path':'/api/auth/login'})
+        with psycopg.connect(self.database.database_url.get_secret_value(), autocommit=True) as login_connection, psycopg.connect(self.database.database_url.get_secret_value(), autocommit=True) as change_connection:
+            change_pid = change_connection.info.backend_pid
+            with ThreadPoolExecutor(max_workers=1, thread_name_prefix='paused-login') as login_executor, ThreadPoolExecutor(max_workers=1) as change_executor:
+                with patch.object(auth, 'verify_password', side_effect=pause_login):
+                    login = login_executor.submit(auth.login, LoginCredentials(email=account.email, password='correct-password'), request, Response(), SessionRepository(login_connection))
+                    try:
+                        self.assertTrue(password_read.wait(5), 'Login did not reach verification')
+                        change = change_executor.submit(auth.change_password, PasswordChange(current_password='correct-password', new_password='new-password-123'), account, SessionRepository(change_connection))
+                        deadline = time.monotonic() + 5
+                        while not change.done():
+                            waiting = self.connection.execute("SELECT wait_event_type FROM pg_stat_activity WHERE pid=%s", (change_pid,)).fetchone()
+                            if waiting and waiting[0] == 'Lock':
+                                break
+                            self.assertLess(time.monotonic(), deadline, 'Password change neither completed nor waited on the login lock')
+                            time.sleep(0.01)
+                    finally:
+                        continue_login.set()
+                    login.result(timeout=5)
+                    self.assertEqual(change.result(timeout=5).status_code, 204)
+        self.assertEqual(self.connection.execute('SELECT count(*) FROM auth_sessions WHERE account_id=%s', (account.id,)).fetchone()[0], 0,
+                         'Old-password login created a session that survived password-change revocation')
