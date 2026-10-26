@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class BotSessionCreate(BaseModel):
+    project_id: str = Field(min_length=1, max_length=200)
     url: str = Field(min_length=1, max_length=2048)
     title: str | None = Field(default=None, max_length=200)
 

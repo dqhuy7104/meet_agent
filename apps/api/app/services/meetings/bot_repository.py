@@ -35,6 +35,9 @@ class BotSession:
     stop_requested: bool
     meeting_id: str | None
     capture_incomplete: bool
+    project_id: str | None
+    started_by_account_id: str | None
+    legacy_unassigned: bool
 
 
 @dataclass(frozen=True)
@@ -85,10 +88,11 @@ class BotSessionRepository:
         ).fetchone()
         return _session(row) if row else None
 
-    def get_recent_interrupted(self) -> BotSession | None:
+    def get_recent_interrupted(self, project_ids: list[str] | None = None) -> BotSession | None:
         row = self._execute(
             """SELECT * FROM bot_sessions WHERE status='interrupted'
-               ORDER BY ended_at DESC, created_at DESC LIMIT 1"""
+               AND (%s::text[] IS NULL OR project_id = ANY(%s))
+               ORDER BY ended_at DESC, created_at DESC LIMIT 1""", (project_ids, project_ids)
         ).fetchone()
         return _session(row) if row else None
 
@@ -98,29 +102,29 @@ class BotSessionRepository:
         ).fetchall()
         return [BotPart(**dict(row)) for row in rows]
 
-    def create(self, url: str, title: str | None, key: str | None) -> BotSession:
+    def create(self, url: str, title: str | None, key: str | None, project_id: str, started_by_account_id: str) -> BotSession:
         try:
             with self.connection.transaction():
                 if key:
                     row = self._execute("SELECT * FROM bot_sessions WHERE idempotency_key=%s", (key,)).fetchone()
                     if row:
-                        if row["url_hash"] != hashlib.sha256(url.encode()).hexdigest():
+                        if (row["url_hash"], row["project_id"], row["started_by_account_id"]) != (hashlib.sha256(url.encode()).hexdigest(), project_id, started_by_account_id):
                             raise BotStateConflict("Idempotency key belongs to another link")
                         return _session(row)
                 if self.get_active():
                     raise BotStateConflict("A bot session is already active")
                 session_id = uuid.uuid4().hex
                 self._execute(
-                    """INSERT INTO bot_sessions (id, url, url_hash, title, idempotency_key, status, created_at)
-                       VALUES (%s, %s, %s, %s, %s, 'queued', %s)""",
-                    (session_id, url, hashlib.sha256(url.encode()).hexdigest(), title, key, _now()),
+                    """INSERT INTO bot_sessions (id, url, url_hash, title, idempotency_key, status, created_at, project_id, started_by_account_id)
+                       VALUES (%s, %s, %s, %s, %s, 'queued', %s, %s, %s)""",
+                    (session_id, url, hashlib.sha256(url.encode()).hexdigest(), title, key, _now(), project_id, started_by_account_id),
                 )
                 return self.get(session_id)  # type: ignore[return-value]
 
         except psycopg.errors.UniqueViolation:
             if key:
                 row = self._execute("SELECT * FROM bot_sessions WHERE idempotency_key=%s", (key,)).fetchone()
-                if row and row['url_hash'] == hashlib.sha256(url.encode()).hexdigest():
+                if row and (row['url_hash'], row['project_id'], row['started_by_account_id']) == (hashlib.sha256(url.encode()).hexdigest(), project_id, started_by_account_id):
                     return _session(row)
             raise BotStateConflict("A bot session or idempotency key already exists") from None
 
@@ -214,9 +218,9 @@ class BotSessionRepository:
             first_key = parts[0].storage_key
             self._execute(
                 """INSERT INTO meetings
-                   (id, title, original_filename, storage_key, checksum, created_at, updated_at, status, source)
-                   VALUES (%s, %s, 'recording.wav', %s, %s, %s, %s, 'queued', 'google_meet_bot')""",
-                (meeting_id, session.title, first_key, checksum, now, now),
+                   (id, title, original_filename, storage_key, checksum, created_at, updated_at, status, source, project_id)
+                   VALUES (%s, %s, 'recording.wav', %s, %s, %s, %s, 'queued', 'google_meet_bot', %s)""",
+                (meeting_id, session.title, first_key, checksum, now, now, session.project_id),
             )
             for part in parts:
                 self._execute(

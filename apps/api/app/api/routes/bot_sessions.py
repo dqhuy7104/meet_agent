@@ -10,6 +10,10 @@ from urllib.parse import urlsplit
 from fastapi import APIRouter, Depends, Header, HTTPException, Response, status
 
 from app.api.routes.meetings import get_meeting_settings, get_meeting_database_settings, require_loopback
+from app.api.auth import CurrentAccount, require_csrf
+from app.api.routes.projects import AccountDependency, RepositoryDependency
+from app.services.access.policy import require_project, visible_project_ids
+from app.services.access.repository import AccessRepository
 from app.core.config import Settings
 from app.db.session import open_database, validate_database
 from app.core.database_config import DatabaseSettings
@@ -66,17 +70,35 @@ def _get(repository: BotSessionRepository, session_id: str) -> BotSession:
     return session
 
 
-@router.post("", response_model=BotSessionResponse, status_code=status.HTTP_202_ACCEPTED)
+
+
+def _authorize(session: BotSession, account: CurrentAccount, access: AccessRepository, *, mutate: bool = False) -> None:
+    if session.project_id is None:
+        raise HTTPException(404, 'Bot session not found')
+    require_project(account, session.project_id, 'read', access)
+    if not mutate:
+        return
+    role = access.role(account, session.project_id)
+    if role in {'system_admin', 'project_manager'}:
+        return
+    if role == 'member' and session.started_by_account_id == account.id and session.meeting_id is None:
+        return
+    raise HTTPException(403, 'Action not permitted')
+
+
+@router.post("", response_model=BotSessionResponse, status_code=status.HTTP_202_ACCEPTED, dependencies=[Depends(require_csrf)])
 def create_bot_session(
     body: BotSessionCreate,
+    account: AccountDependency, access: RepositoryDependency,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
 ) -> BotSessionResponse:
+    require_project(account, body.project_id, 'start_bot', access)
     url = canonical_meet_url(body.url)
     if idempotency_key == "":
         raise HTTPException(status_code=422, detail="Idempotency-Key must not be empty")
     try:
-        session = repository.create(url, body.title, idempotency_key)
+        session = repository.create(url, body.title, idempotency_key, body.project_id, account.id)
     except BotStateConflict as error:
         raise HTTPException(status_code=409, detail="A bot session is already active or the key belongs to another link") from error
     return _response(repository, session)
@@ -84,45 +106,56 @@ def create_bot_session(
 
 @router.get("/active", response_model=BotSessionResponse | None)
 def get_active_bot_session(
+    account: AccountDependency, access: RepositoryDependency,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
 ) -> BotSessionResponse | Response:
     session = repository.get_active()
+    if session and session.project_id not in visible_project_ids(account, access):
+        session = None
     return _response(repository, session) if session else Response(status_code=204)
 
 
 @router.get("/recent", response_model=BotSessionResponse | None)
 def get_recent_interrupted_bot_session(
+    account: AccountDependency, access: RepositoryDependency,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
 ) -> BotSessionResponse | Response:
-    session = repository.get_recent_interrupted()
+    session = repository.get_recent_interrupted(visible_project_ids(account, access))
     return _response(repository, session) if session else Response(status_code=204)
 
 
 @router.get("/{session_id}", response_model=BotSessionResponse)
 def get_bot_session(
-    session_id: str, repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
-) -> BotSessionResponse:
-    return _response(repository, _get(repository, session_id))
-
-
-@router.post("/{session_id}/stop", response_model=BotSessionResponse)
-def stop_bot_session(
+    account: AccountDependency, access: RepositoryDependency,
     session_id: str, repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
 ) -> BotSessionResponse:
     session = _get(repository, session_id)
+    _authorize(session, account, access)
+    return _response(repository, session)
+
+
+@router.post("/{session_id}/stop", response_model=BotSessionResponse, dependencies=[Depends(require_csrf)])
+def stop_bot_session(
+    account: AccountDependency, access: RepositoryDependency,
+    session_id: str, repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
+) -> BotSessionResponse:
+    session = _get(repository, session_id)
+    _authorize(session, account, access, mutate=True)
     if session.status not in {"queued", "joining", "waiting_admission", "recording"}:
         raise HTTPException(status_code=409, detail="Bot session cannot be stopped")
     stopped = repository.request_stop(session_id)
     return _response(repository, stopped)  # type: ignore[arg-type]
 
 
-@router.post("/{session_id}/process-parts", response_model=BotSessionResponse)
+@router.post("/{session_id}/process-parts", response_model=BotSessionResponse, dependencies=[Depends(require_csrf)])
 def process_bot_parts(
+    account: AccountDependency, access: RepositoryDependency,
     session_id: str,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
 ) -> BotSessionResponse:
     session = _get(repository, session_id)
+    _authorize(session, account, access, mutate=True)
     if session.status == "completed" and session.capture_incomplete:
         return _response(repository, session)
     if session.status != "interrupted" or not repository.parts(session_id):
@@ -135,13 +168,15 @@ def process_bot_parts(
     return _response(repository, _get(repository, session_id))
 
 
-@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT, dependencies=[Depends(require_csrf)])
 def discard_bot_session(
+    account: AccountDependency, access: RepositoryDependency,
     session_id: str,
     repository: Annotated[BotSessionRepository, Depends(get_bot_repository)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
 ) -> None:
-    _get(repository, session_id)
+    session = _get(repository, session_id)
+    _authorize(session, account, access, mutate=True)
     try:
         with audio_publication_lock(settings.meeting_data_dir):
             keys = repository.discard(session_id)
