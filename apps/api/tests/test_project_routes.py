@@ -129,3 +129,17 @@ class ProjectRoutesTest(PostgresAsyncTestCase):
                     token,_=SessionRepository(login_connection).create(self.member.id)
                 self.assertTrue(change.result(timeout=5).is_disabled)
         self.assertIsNone(SessionRepository(self.connection).resolve(token))
+
+    async def test_admin_cannot_access_unassigned_historical_meeting(self):
+        from unittest.mock import patch
+        from types import SimpleNamespace
+        from fastapi import HTTPException
+        from app.services.access.policy import require_meeting
+        admin = self.repository.account_by_id(self.admin.id)
+        historical = SimpleNamespace(id='historical', project_id=None, legacy_unassigned=True)
+        with patch('app.services.access.policy.MeetingRepository.get_meeting', return_value=historical):
+            for action in ('read', 'download', 'chat', 'edit', 'delete', 'cancel', 'retry', 'identify'):
+                with self.subTest(action=action):
+                    with self.assertRaises(HTTPException) as raised:
+                        require_meeting(admin, historical.id, action, self.repository)
+                    self.assertEqual(raised.exception.status_code, 404)

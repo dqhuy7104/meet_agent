@@ -37,12 +37,9 @@ def require_meeting(account: Account, meeting_id: str, action: MeetingAction,
     if meeting is None or account.is_disabled:
         raise HTTPException(404, 'Meeting not found')
     if meeting.project_id is None:
-        if not account.is_system_admin:
-            raise HTTPException(404, 'Meeting not found')
-        role = 'system_admin'
-    else:
-        require_project(account, meeting.project_id, 'read', repository)
-        role = repository.role(account, meeting.project_id)
+        raise HTTPException(404, 'Meeting not found')
+    require_project(account, meeting.project_id, 'read', repository)
+    role = repository.role(account, meeting.project_id)
     allowed = action in {'read', 'download', 'chat'} or role in {'system_admin', 'project_manager'}
     if action in {'delete', 'cancel', 'retry'} and role == 'member':
         allowed = meeting.source == 'upload' and meeting.uploaded_by_account_id == account.id
