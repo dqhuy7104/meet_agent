@@ -12,7 +12,8 @@ from app.services.meetings.storage import audio_path, audio_publication_lock, in
 
 
 def ingest_meeting(database: DatabaseSettings, data_dir: Path, parts: list[tuple[str, bytes]],
-                   title: str | None, idempotency_key: str | None) -> MeetingRecord:
+                   title: str | None, idempotency_key: str | None, *,
+                   project_id: str, uploaded_by_account_id: str) -> MeetingRecord:
     if len(parts) == 1:
         checksum = hashlib.sha256(parts[0][1]).hexdigest()
     else:
@@ -28,7 +29,8 @@ def ingest_meeting(database: DatabaseSettings, data_dir: Path, parts: list[tuple
         if idempotency_key:
             existing = repository.find_by_idempotency_key(idempotency_key)
             if existing:
-                if existing.checksum != checksum:
+                if (existing.checksum != checksum or existing.project_id != project_id
+                        or existing.uploaded_by_account_id != uploaded_by_account_id):
                     raise IdempotencyConflict(idempotency_key)
                 return existing
         with audio_publication_lock(data_dir):
@@ -38,7 +40,8 @@ def ingest_meeting(database: DatabaseSettings, data_dir: Path, parts: list[tuple
                 for filename, data in parts:
                     published.append((filename, publish_audio(data_dir, data)))
                 return repository.create_meeting(meeting_id, title, parts[0][0], published[0][1],
-                    checksum, idempotency_key, audio_files=published)
+                    checksum, idempotency_key, audio_files=published,
+                    project_id=project_id, uploaded_by_account_id=uploaded_by_account_id)
             except (psycopg.OperationalError, psycopg.InterfaceError):
                 # The server may have committed before its acknowledgement was lost.
                 with open_database(database) as recovery:
@@ -50,7 +53,8 @@ def ingest_meeting(database: DatabaseSettings, data_dir: Path, parts: list[tuple
                 for _, key in published:
                     audio_path(data_dir, key).unlink(missing_ok=True)
                 existing = repository.find_by_idempotency_key(idempotency_key)
-                if existing and existing.checksum == checksum:
+                if (existing and existing.checksum == checksum and existing.project_id == project_id
+                        and existing.uploaded_by_account_id == uploaded_by_account_id):
                     return existing
                 raise
             except (psycopg.Error, OSError):

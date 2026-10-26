@@ -15,6 +15,7 @@ from psycopg.conninfo import make_conninfo
 from pydantic import SecretStr
 
 from app.core.database_config import DatabaseSettings
+from app.services.access.repository import Account, Project
 
 
 @dataclass
@@ -88,9 +89,21 @@ def seed_snapshot(connection, snapshot):
     from app.services.rag.chunking import snapshot_meeting
     repository = MeetingRepository(connection)
     if repository.get_meeting(snapshot.meeting_id) is None:
-        repository.create_meeting(snapshot.meeting_id, snapshot.title, 'source.wav', uuid.uuid4().hex, 'hash', None)
+        account, project = seed_project(connection)
+        repository.create_meeting(snapshot.meeting_id, snapshot.title, 'source.wav', uuid.uuid4().hex, 'hash', None,
+                                  project_id=project.id, uploaded_by_account_id=account.id)
     connection.execute("UPDATE meetings SET status='processing',title=%s WHERE id=%s", (snapshot.title, snapshot.meeting_id))
     repository.complete(snapshot.meeting_id, AudioProcessResponse(filename='source.wav', duration_seconds=max((s.end_seconds for s in snapshot.segments), default=0),
         transcript=' '.join(s.text for s in snapshot.segments), vad_segments=[], diarization_segments=[],
         transcript_segments=[TranscriptSegment(start=s.start_seconds,end=s.end_seconds,speaker=s.speaker,text=s.text) for s in snapshot.segments]))
     return snapshot_meeting(repository.get_detail(snapshot.meeting_id))
+
+
+def seed_project(connection: psycopg.Connection) -> tuple[Account, Project]:
+    """Create a real account and project for internal meeting fixtures."""
+    from app.services.access.repository import AccessRepository
+    repository = AccessRepository(connection)
+    account = repository.create_account(f"fixture-{uuid.uuid4().hex}@example.com", "hash")
+    project = repository.create_project("Test project")
+    repository.set_membership(project.id, account.id, "member")
+    return account, project

@@ -1,7 +1,9 @@
 """HTTP upload and local-access contracts for stored meetings."""
 
 from __future__ import annotations
-from apps.api.tests.postgres_support import PostgresAsyncTestCase
+from apps.api.tests.postgres_support import PostgresAsyncTestCase, seed_project
+from app.services.access.repository import AccessRepository, Account
+from app.services.access.sessions import SessionRepository, COOKIE_NAME
 
 import psycopg
 import tempfile
@@ -30,10 +32,19 @@ class MeetingUploadTest(PostgresAsyncTestCase):
             return Settings(meeting_data_dir=self.data_dir)
 
         app.dependency_overrides[get_meeting_settings] = test_settings
+        self.account, self.project = seed_project(self.connection)
+        self.access = AccessRepository(self.connection)
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 4000), raise_app_exceptions=False),
             base_url="http://localhost",
         )
+
+        self.as_account(self.account)
+
+    def as_account(self, account: Account) -> None:
+        token, csrf = SessionRepository(self.connection).create(account.id)
+        self.client.cookies.set(COOKIE_NAME, token)
+        self.client.headers["X-CSRF-Token"] = csrf
 
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
@@ -41,10 +52,124 @@ class MeetingUploadTest(PostgresAsyncTestCase):
 
     async def _upload(self, data: bytes, *, title: str | None = None, key: str | None = None) -> httpx.Response:
         headers = {"Idempotency-Key": key} if key is not None else {}
-        form = {"title": title} if title else {}
+        form = {"project_id": self.project.id}
+        if title:
+            form["title"] = title
         return await self.client.post(
             "/api/meetings", files={"file": ("private.wav", data, "audio/wav")}, data=form, headers=headers
         )
+
+    async def test_anonymous_and_new_account_are_scoped(self) -> None:
+        meeting = (await self._upload(b"private")).json()["meeting_id"]
+        self.client.cookies.clear()
+        self.assertEqual((await self.client.get("/api/meetings")).status_code, 401)
+        self.assertEqual((await self.client.get(f"/api/meetings/{meeting}")).status_code, 401)
+        outsider = self.access.create_account("new@example.com", "hash")
+        self.as_account(outsider)
+        self.assertEqual((await self.client.get("/api/meetings")).json()["total"], 0)
+        for path in (meeting, f"{meeting}/audio", f"{meeting}/audio/0"):
+            self.assertEqual((await self.client.get(f"/api/meetings/{path}")).status_code, 404)
+        self.assertEqual((await self.client.get("/api/meetings/search", params={"q":"private"})).json()["total"], 0)
+        self.assertEqual((await self._upload(b"forbidden")).status_code, 404)
+
+    async def test_project_filter_idempotency_and_archived_upload(self) -> None:
+        first = (await self._upload(b"audio", key="scoped")).json()["meeting_id"]
+        second_project = self.access.create_project("Second")
+        self.access.set_membership(second_project.id, self.account.id, "member")
+        original_project = self.project
+        self.project = second_project
+        conflict = await self._upload(b"audio", key="scoped")
+        self.assertEqual(conflict.status_code, 409)
+        second = (await self._upload(b"other")).json()["meeting_id"]
+        response = await self.client.get("/api/meetings", params={"project_id":second_project.id})
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual([item["id"] for item in response.json()["items"]], [second])
+        self.assertEqual(response.json()["items"][0]["uploaded_by_account_id"], self.account.id)
+        self.access.update_project(second_project.id, is_archived=True)
+        self.assertEqual((await self._upload(b"blocked")).status_code, 403)
+        self.assertEqual((await self.client.get(f"/api/meetings/{second}")).status_code, 200)
+        self.project = original_project
+        other = self.access.create_account("other@example.com", "hash")
+        self.access.set_membership(self.project.id, other.id, "member")
+        self.as_account(other)
+        self.assertEqual((await self._upload(b"audio", key="scoped")).status_code, 409)
+
+    async def test_member_ownership_and_manager_authorization(self) -> None:
+        own = (await self._upload(b"own")).json()["meeting_id"]
+        self.assertEqual((await self.client.delete(f"/api/meetings/{own}")).status_code, 204)
+        other = self.access.create_account("other@example.com", "hash")
+        self.access.set_membership(self.project.id, other.id, "member")
+        self.as_account(other)
+        theirs = (await self._upload(b"theirs")).json()["meeting_id"]
+        self.connection.execute("UPDATE meetings SET status='failed' WHERE id=%s", (theirs,))
+        self.as_account(self.account)
+        self.assertEqual((await self.client.delete(f"/api/meetings/{theirs}")).status_code, 403)
+        self.assertEqual((await self.client.post(f"/api/meetings/{theirs}/retry")).status_code, 403)
+        bot = (await self._upload(b"bot")).json()["meeting_id"]
+        self.connection.execute("UPDATE meetings SET source='bot',status='failed' WHERE id=%s", (bot,))
+        self.assertEqual((await self.client.delete(f"/api/meetings/{bot}")).status_code, 403)
+        self.assertEqual((await self.client.post(f"/api/meetings/{bot}/retry")).status_code, 403)
+        self.access.set_membership(self.project.id, self.account.id, "project_manager")
+        self.assertEqual((await self.client.post(f"/api/meetings/{theirs}/retry")).status_code, 202)
+        self.assertEqual((await self.client.delete(f"/api/meetings/{bot}")).status_code, 204)
+
+    async def test_search_and_direct_ids_do_not_cross_projects(self) -> None:
+        own = (await self._upload(b"own")).json()["meeting_id"]
+        account, project = seed_project(self.connection)
+        self.as_account(account)
+        self.project = project
+        hidden = (await self._upload(b"hidden")).json()["meeting_id"]
+        repository = MeetingRepository(self.connection)
+        for meeting_id in (own, hidden):
+            self.connection.execute("UPDATE meetings SET status='processing' WHERE id=%s", (meeting_id,))
+            repository.complete(meeting_id, AudioProcessResponse(
+                filename="a.wav", duration_seconds=1, transcript="needle",
+                vad_segments=[], diarization_segments=[],
+                transcript_segments=[TranscriptSegment(start=0, end=1, speaker="S0", text="needle")]))
+        self.as_account(self.account)
+        response = await self.client.get("/api/meetings/search", params={"q":"needle", "limit":1})
+        self.assertEqual(response.json()["total"], 1)
+        self.assertEqual([item["meeting_id"] for item in response.json()["items"]], [own])
+        for path in (hidden, f"{hidden}/audio", f"{hidden}/audio/0"):
+            self.assertEqual((await self.client.get(f"/api/meetings/{path}")).status_code, 404)
+        self.assertEqual((await self.client.delete(f"/api/meetings/{hidden}")).status_code, 404)
+        self.assertEqual((await self.client.post(f"/api/meetings/{hidden}/retry")).status_code, 404)
+        for path in ("/api/meetings", "/api/meetings/search?q=needle"):
+            self.assertEqual((await self.client.get(path, params={"project_id":project.id, "q":"needle"})).status_code, 404)
+
+    async def test_historical_meeting_hidden_from_admin_and_csrf_required(self) -> None:
+        meeting = (await self._upload(b"old")).json()["meeting_id"]
+        # Emulate a row retained by the access migration in this disposable schema.
+        self.connection.execute("ALTER TABLE meetings DISABLE TRIGGER meetings_reject_new_legacy")
+        self.connection.execute("UPDATE meetings SET project_id=NULL,legacy_unassigned=true WHERE id=%s", (meeting,))
+        self.connection.execute("ALTER TABLE meetings ENABLE TRIGGER meetings_reject_new_legacy")
+        self.connection.execute("UPDATE accounts SET is_system_admin=true WHERE id=%s", (self.account.id,))
+        self.assertEqual((await self.client.get(f"/api/meetings/{meeting}")).status_code, 404)
+        self.assertEqual((await self.client.get("/api/meetings")).json()["total"], 0)
+        self.client.headers.pop("X-CSRF-Token")
+        self.assertEqual((await self._upload(b"csrf")).status_code, 403)
+
+    async def test_viewer_reads_but_cannot_upload_delete_or_retry(self) -> None:
+        meeting = (await self._upload(b"read only")).json()["meeting_id"]
+        viewer = self.access.create_account("viewer@example.com", "hash")
+        self.access.set_membership(self.project.id, viewer.id, "viewer")
+        self.as_account(viewer)
+        self.assertEqual((await self.client.get(f"/api/meetings/{meeting}")).status_code, 200)
+        self.assertEqual((await self.client.get(f"/api/meetings/{meeting}/audio")).status_code, 200)
+        self.assertEqual((await self._upload(b"forbidden")).status_code, 403)
+        self.assertEqual((await self.client.delete(f"/api/meetings/{meeting}")).status_code, 403)
+        self.assertEqual((await self.client.post(f"/api/meetings/{meeting}/retry")).status_code, 403)
+
+    async def test_upload_requires_project_and_mutations_require_csrf(self) -> None:
+        missing = await self.client.post("/api/meetings", files={"file":("a.wav", b"audio", "audio/wav")})
+        self.assertEqual(missing.status_code, 422)
+        meeting = (await self._upload(b"own")).json()["meeting_id"]
+        self.connection.execute("UPDATE meetings SET status='failed' WHERE id=%s", (meeting,))
+        self.client.headers.pop("X-CSRF-Token")
+        self.assertEqual((await self.client.delete(f"/api/meetings/{meeting}")).status_code, 403)
+        self.assertEqual((await self.client.post(f"/api/meetings/{meeting}/retry")).status_code, 403)
+        self.as_account(self.account)
+        self.assertEqual((await self.client.post(f"/api/meetings/{meeting}/retry")).status_code, 202)
 
     async def test_upload_returns_queued_metadata_without_decoding(self) -> None:
         response = await self._upload(b"not decoded in the route", title="Planning")
@@ -64,7 +189,7 @@ class MeetingUploadTest(PostgresAsyncTestCase):
                 ("files", ("first.wav", b"first audio", "audio/wav")),
                 ("files", ("second.wav", b"second audio", "audio/wav")),
             ],
-            data={"title": "Planning"},
+            data={"title": "Planning", "project_id": self.project.id},
         )
         self.assertEqual(response.status_code, 202)
         meeting_id = response.json()["meeting_id"]
@@ -83,7 +208,7 @@ class MeetingUploadTest(PostgresAsyncTestCase):
     async def test_multiple_files_reject_empty_part_without_persisting(self) -> None:
         response = await self.client.post(
             "/api/meetings",
-            files=[("files", ("a.wav", b"valid", "audio/wav")), ("files", ("empty.wav", b"", "audio/wav"))],
+            files=[("files", ("a.wav", b"valid", "audio/wav")), ("files", ("empty.wav", b"", "audio/wav"))], data={"project_id": self.project.id},
         )
         self.assertEqual(response.status_code, 400)
         self.assertEqual(list((self.data_dir / "audio").glob("*")), [])
@@ -91,9 +216,9 @@ class MeetingUploadTest(PostgresAsyncTestCase):
     async def test_multi_file_idempotency_uses_ordered_content(self) -> None:
         first = [("files", ("a.wav", b"a", "audio/wav")), ("files", ("b.wav", b"b", "audio/wav"))]
         reverse = list(reversed(first))
-        original = await self.client.post("/api/meetings", files=first, headers={"Idempotency-Key": "multi"})
-        repeated = await self.client.post("/api/meetings", files=first, headers={"Idempotency-Key": "multi"})
-        conflict = await self.client.post("/api/meetings", files=reverse, headers={"Idempotency-Key": "multi"})
+        original = await self.client.post("/api/meetings", files=first, data={"project_id": self.project.id}, headers={"Idempotency-Key": "multi"})
+        repeated = await self.client.post("/api/meetings", files=first, data={"project_id": self.project.id}, headers={"Idempotency-Key": "multi"})
+        conflict = await self.client.post("/api/meetings", files=reverse, data={"project_id": self.project.id}, headers={"Idempotency-Key": "multi"})
         self.assertEqual(original.status_code, 202)
         self.assertEqual(repeated.json()["meeting_id"], original.json()["meeting_id"])
         self.assertEqual(conflict.status_code, 409)
@@ -220,12 +345,14 @@ class MeetingUploadTest(PostgresAsyncTestCase):
         proxied = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 4000)),
             base_url="http://127.0.0.1:8000",
+            cookies=self.client.cookies,
         )
         try:
             response = await proxied.post(
                 "/api/meetings",
                 files={"file": ("private.wav", b"audio", "audio/wav")},
-                headers={"Origin": "http://localhost:5173"},
+                data={"project_id": self.project.id},
+                headers={"Origin": "http://localhost:5173", "X-CSRF-Token": self.client.headers["X-CSRF-Token"]},
             )
         finally:
             await proxied.aclose()
@@ -274,7 +401,7 @@ class MeetingUploadTest(PostgresAsyncTestCase):
 
     async def test_original_audio_and_ranges_use_stored_key(self) -> None:
         response = await self.client.post(
-            "/api/meetings", files={"file": ("../../client.wav", b"abcdefghij", "audio/wav")}
+            "/api/meetings", files={"file": ("../../client.wav", b"abcdefghij", "audio/wav")}, data={"project_id": self.project.id}
         )
         meeting_id = response.json()["meeting_id"]
         full = await self.client.get(f"/api/meetings/{meeting_id}/audio")
@@ -351,6 +478,24 @@ class MeetingUploadTest(PostgresAsyncTestCase):
             self.assertEqual(list((self.data_dir / "audio").glob("*")), [])
         finally:
             connection.close()
+
+
+class MeetingScopeContractTest(unittest.TestCase):
+    def test_collection_passes_only_visible_projects_to_repository(self) -> None:
+        from unittest.mock import Mock
+        from app.api.routes.meetings import list_meetings
+        from app.services.access.repository import Account, Project
+        account = Account('account', 'member@example.com', False, False)
+        access = Mock()
+        access.visible_projects.return_value = [Project('visible', 'Visible', False)]
+        repository = Mock()
+        repository.list_meetings.return_value = []
+        repository.count_meetings.return_value = 0
+        response = list_meetings(account=account, access=access, repository=repository,
+                                 limit=20, offset=0, project_id=None)
+        self.assertEqual(response.total, 0)
+        repository.list_meetings.assert_called_once_with(20, 0, ['visible'])
+        repository.count_meetings.assert_called_once_with(['visible'])
 
 
 if __name__ == "__main__":

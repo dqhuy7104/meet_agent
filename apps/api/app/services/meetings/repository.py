@@ -111,14 +111,15 @@ class MeetingRepository:
     def create_meeting(self, meeting_id: str, title: str | None, filename: str,
                        storage_key: str, checksum: str, idempotency_key: str | None,
                        audio_files: list[tuple[str, str]] | None = None,
-                       source: str = "upload") -> MeetingRecord:
+                       source: str = "upload", *, project_id: str,
+                       uploaded_by_account_id: str | None = None) -> MeetingRecord:
         now = datetime.now(timezone.utc)
         try:
             with self.connection.transaction():
                 self.connection.execute("""INSERT INTO meetings
-                    (id,title,original_filename,storage_key,checksum,idempotency_key,created_at,updated_at,status,source)
-                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s)""",
-                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now, source))
+                    (id,title,original_filename,storage_key,checksum,idempotency_key,created_at,updated_at,status,source,project_id,uploaded_by_account_id)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,'queued',%s,%s,%s)""",
+                    (meeting_id, title, filename, storage_key, checksum, idempotency_key, now, now, source, project_id, uploaded_by_account_id))
                 for ordinal, (part_filename, part_key) in enumerate(audio_files or [(filename, storage_key)]):
                     self.connection.execute("""INSERT INTO meeting_audio_files
                         (meeting_id,ordinal,original_filename,storage_key) VALUES (%s,%s,%s,%s)""",
@@ -146,9 +147,11 @@ class MeetingRepository:
         row = self._execute("SELECT * FROM meetings WHERE idempotency_key=%s", (key,)).fetchone()
         return _record(row) if row else None
 
-    def list_meetings(self, limit: int, offset: int) -> list[MeetingRecord]:
+    def list_meetings(self, limit: int, offset: int, project_ids: list[str] | None = None) -> list[MeetingRecord]:
+        scope = " WHERE project_id = ANY(%s)" if project_ids is not None else ""
+        parameters = (project_ids, limit, offset) if project_ids is not None else (limit, offset)
         return [_record(row) for row in self._execute(
-            "SELECT * FROM meetings ORDER BY created_at DESC,id DESC LIMIT %s OFFSET %s", (limit, offset)).fetchall()]
+            "SELECT * FROM meetings" + scope + " ORDER BY created_at DESC,id DESC LIMIT %s OFFSET %s", parameters).fetchall()]
 
     def claim_next(self) -> MeetingRecord | None:
         with self.connection.transaction():
@@ -255,7 +258,9 @@ class MeetingRepository:
             enqueue_rag_event(self.connection, meeting_id, "purge")
             return self.get_meeting(meeting_id)
 
-    def count_meetings(self) -> int:
+    def count_meetings(self, project_ids: list[str] | None = None) -> int:
+        if project_ids is not None:
+            return self.connection.execute("SELECT count(*) FROM meetings WHERE project_id = ANY(%s)", (project_ids,)).fetchone()[0]
         return self.connection.execute("SELECT count(*) FROM meetings").fetchone()[0]
 
     def completed_meeting_ids(self) -> list[str]:
@@ -301,16 +306,20 @@ class MeetingRepository:
             enqueue_rag_event(self.connection, meeting_id, "purge")
             return record.storage_key
 
-    def search_segments(self, query: str, limit: int, offset: int) -> tuple[list[SearchHit], int]:
+    def search_segments(self, query: str, limit: int, offset: int, project_ids: list[str] | None = None) -> tuple[list[SearchHit], int]:
         joined = """FROM transcript_segments AS segment JOIN meetings AS meeting ON meeting.id=segment.meeting_id
             LEFT JOIN meeting_speaker_identities AS identity ON identity.meeting_id=meeting.id AND identity.speaker=segment.speaker
             LEFT JOIN voice_profiles AS profile ON profile.id=identity.profile_id
             WHERE segment.document @@ plainto_tsquery('simple',%s) AND meeting.status='completed'"""
+        parameters = (query,)
+        if project_ids is not None:
+            joined += " AND meeting.project_id = ANY(%s)"
+            parameters = (query, project_ids)
         with self.connection.transaction():
             self.connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
-            total = self.connection.execute("SELECT count(*) " + joined, (query,)).fetchone()[0]
+            total = self.connection.execute("SELECT count(*) " + joined, parameters).fetchone()[0]
             rows = self._execute("""SELECT meeting.id AS meeting_id,meeting.title,segment.speaker,
                 segment.start_seconds AS start,segment.end_seconds AS end,segment.text,profile.display_name AS speaker_name """ + joined +
                 " ORDER BY meeting.created_at DESC,meeting.id DESC,segment.start_seconds,segment.id LIMIT %s OFFSET %s",
-                (query, limit, offset)).fetchall()
+                (*parameters, limit, offset)).fetchall()
             return [SearchHit(**row) for row in rows], total

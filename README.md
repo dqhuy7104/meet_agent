@@ -64,6 +64,8 @@ Audio is kept on the local Docker volume. The API only listens on loopback; do n
 
 Migration 004 adds accounts, projects, and memberships. It keeps existing meetings and bot sessions without a project for manual cleanup; new records require a project. Run the shared migration explicitly before starting updated services. Roll back by restoring a reviewed pre-migration database backup or writing a reviewed reverse migration for the affected deployment. Do not silently drop the new tables or historical data.
 
+Stored meeting routes require a signed-in session; uploads, deletion and retries also require the `X-CSRF-Token` header. Upload multipart forms must select `project_id`. Lists and transcript search accept an optional `project_id` filter and return only accessible projects. Archived projects remain readable but reject uploads. Members may delete or retry only their own uploads; project managers and Admin may act on any meeting in their scope. Idempotency keys replay only for the same account, project and audio. Meeting metadata includes `project_id` and `uploaded_by_account_id`. Historical projectless meetings remain hidden, including from Admin.
+
 ## Local accounts
 
 Apply shared migrations before starting the API. Create the first administrator with
