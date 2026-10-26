@@ -13,6 +13,8 @@ from app.api.routes.chat import router as chat_router
 from app.api.routes.voice import router as voice_router
 
 app = FastAPI(title="Meeting AI API")
+from app.api.routes.auth import router as auth_router
+app.include_router(auth_router, prefix="/api")
 app.include_router(voice_router, prefix="/api")
 app.include_router(audio_router, prefix="/api")
 app.include_router(meetings_router, prefix="/api")

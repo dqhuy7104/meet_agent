@@ -63,3 +63,21 @@ Audio is kept on the local Docker volume. The API only listens on loopback; do n
 ## Project access migration
 
 Migration 004 adds accounts, projects, and memberships. It keeps existing meetings and bot sessions without a project for manual cleanup; new records require a project. Run the shared migration explicitly before starting updated services. Roll back by restoring a reviewed pre-migration database backup or writing a reviewed reverse migration for the affected deployment. Do not silently drop the new tables or historical data.
+
+## Local accounts
+
+Apply shared migrations before starting the API. Create the first administrator with
+`PYTHONPATH=apps/api uv run --env-file .env python -m app.commands.bootstrap_admin`;
+it prompts for a password without echo and refuses a second administrator bootstrap.
+Registration (`POST /api/auth/register`) creates an unassigned account; email identifiers
+are unique but mailbox ownership is not verified. Passwords require 12–1024 characters.
+
+Login and registration return an account and CSRF token, and set an HttpOnly,
+SameSite=Strict cookie scoped to `/api`. Read `GET /api/auth/session` to restore the
+session and CSRF token. Send `X-CSRF-Token` on authenticated writes, including logout
+and password change. Password change requires `current_password` and `new_password`
+and revokes every account session. Sessions expire after one idle hour or seven days;
+disabled accounts cannot authenticate. Login and registration share a PostgreSQL
+limit of 20 attempts per peer per 15 minutes. Authentication remains loopback-only.
+Set `AUTH_COOKIE_SECURE=true` for HTTPS; this rejects HTTP authentication requests.
+Public company-network deployment still requires a separate boundary review.
