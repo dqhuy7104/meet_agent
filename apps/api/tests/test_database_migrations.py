@@ -13,14 +13,15 @@ class DatabaseMigrationTest(unittest.TestCase):
         with isolated_postgres(migrate=False) as fixture:
             migrate_database(fixture.connection)
             self.assertEqual([row[0] for row in fixture.connection.execute(
-                "SELECT version FROM schema_migrations ORDER BY version").fetchall()], [1, 2, 3])
-            from app.services.meetings.repository import MeetingRepository
-            MeetingRepository(fixture.connection).create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+                "SELECT version FROM schema_migrations ORDER BY version").fetchall()], [1, 2, 3, 4])
+            from app.services.access.repository import AccessRepository
+            project = AccessRepository(fixture.connection).create_project('Migration test')
+            fixture.connection.execute("INSERT INTO meetings (id,original_filename,storage_key,checksum,created_at,updated_at,status,project_id) VALUES ('m','a.wav',%s,'hash',now(),now(),'queued',%s)", ('a'*32, project.id))
             self.assertEqual(fixture.connection.execute(
                 "SELECT voice_identification_status FROM meetings WHERE id='m'").fetchone()[0], "not_run")
             identity = fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0]
             migrate_database(fixture.connection)
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 3)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 4)
             self.assertEqual(fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0], identity)
             with open_database(fixture.database) as connection:
                 validate_database(connection)
@@ -38,7 +39,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                     migrate_database(connection)
             with ThreadPoolExecutor(max_workers=2) as executor:
                 list(executor.map(lambda _: migrate(), range(2)))
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 3)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 4)
 
     def test_unversioned_application_tables_are_not_adopted(self) -> None:
         with isolated_postgres(migrate=False) as fixture:
@@ -55,9 +56,10 @@ class DatabaseMigrationTest(unittest.TestCase):
                 validate_database(fixture.connection)
 
     def test_invalid_audio_intervals_and_ordinals_are_rejected(self) -> None:
-        from app.services.meetings.repository import MeetingRepository
+        from app.services.access.repository import AccessRepository
         with isolated_postgres() as fixture:
-            MeetingRepository(fixture.connection).create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+            project = AccessRepository(fixture.connection).create_project('Migration test')
+            fixture.connection.execute("INSERT INTO meetings (id,original_filename,storage_key,checksum,created_at,updated_at,status,project_id) VALUES ('m','a.wav',%s,'hash',now(),now(),'queued',%s)", ('a'*32, project.id))
             for values in ((-1, 0, 1), (0, -1, 1), (0, 2, 1)):
                 with self.subTest(values=values), self.assertRaises(psycopg.errors.CheckViolation):
                     fixture.connection.execute('INSERT INTO vad_segments VALUES (%s,%s,%s,%s)', ('m', *values))

@@ -59,3 +59,7 @@ Audio is kept on the local Docker volume. The API only listens on loopback; do n
 4. Open `http://127.0.0.1:5173/app/`. The first transcription downloads the speech models and can take several minutes. View logs with `docker compose logs --tail=100 api worker migrate`.
 
 `docker compose down` preserves data and models. Do not run `docker compose down -v` unless you intend to delete them.
+
+## Project access migration
+
+Migration 004 adds accounts, projects, and memberships. It keeps existing meetings and bot sessions without a project for manual cleanup; new records require a project. Run the shared migration explicitly before starting updated services. Roll back by restoring a reviewed pre-migration database backup or writing a reviewed reverse migration for the affected deployment. Do not silently drop the new tables or historical data.
