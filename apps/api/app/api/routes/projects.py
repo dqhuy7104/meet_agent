@@ -17,6 +17,11 @@ def get_access_repository(session: Annotated[SessionRepository, Depends(get_sess
 RepositoryDependency = Annotated[AccessRepository, Depends(get_access_repository)]
 WriteDependencies = [Depends(require_csrf)]
 
+def project_response(project, account: CurrentAccount, repository: AccessRepository) -> ProjectResponse:
+    return ProjectResponse(id=project.id, name=project.name, is_archived=project.is_archived,
+                           role=repository.role(account, project.id))
+
+
 
 def require_admin(account: CurrentAccount) -> None:
     if account.is_disabled or not account.is_system_admin:
@@ -25,36 +30,36 @@ def require_admin(account: CurrentAccount) -> None:
 
 @router.get('', response_model=list[ProjectResponse])
 def projects(account: AccountDependency, repository: RepositoryDependency) -> list[ProjectResponse]:
-    return repository.visible_projects(account)
+    return [project_response(project, account, repository) for project in repository.visible_projects(account)]
 
 
 @router.post('', response_model=ProjectResponse, status_code=201, dependencies=WriteDependencies)
 def create_project(payload: ProjectName, account: AccountDependency, repository: RepositoryDependency) -> ProjectResponse:
     require_admin(account)
-    return repository.create_project(payload.name)
+    return project_response(repository.create_project(payload.name), account, repository)
 
 
 @router.get('/{project_id}', response_model=ProjectResponse)
 def project(project_id: str, account: AccountDependency, repository: RepositoryDependency) -> ProjectResponse:
-    return require_project(account, project_id, 'read', repository)
+    return project_response(require_project(account, project_id, 'read', repository), account, repository)
 
 
 @router.patch('/{project_id}', response_model=ProjectResponse, dependencies=WriteDependencies)
 def rename_project(project_id: str, payload: ProjectName, account: AccountDependency, repository: RepositoryDependency) -> ProjectResponse:
     require_project(account, project_id, 'rename', repository)
-    return repository.update_project(project_id, name=payload.name)
+    return project_response(repository.update_project(project_id, name=payload.name), account, repository)
 
 
 @router.post('/{project_id}/archive', response_model=ProjectResponse, dependencies=WriteDependencies)
 def archive_project(project_id: str, account: AccountDependency, repository: RepositoryDependency) -> ProjectResponse:
     require_project(account, project_id, 'archive', repository)
-    return repository.update_project(project_id, is_archived=True)
+    return project_response(repository.update_project(project_id, is_archived=True), account, repository)
 
 
 @router.post('/{project_id}/restore', response_model=ProjectResponse, dependencies=WriteDependencies)
 def restore_project(project_id: str, account: AccountDependency, repository: RepositoryDependency) -> ProjectResponse:
     require_project(account, project_id, 'restore', repository)
-    return repository.update_project(project_id, is_archived=False)
+    return project_response(repository.update_project(project_id, is_archived=False), account, repository)
 
 
 @router.get('/{project_id}/members', response_model=list[MembershipResponse])

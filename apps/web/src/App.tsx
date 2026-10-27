@@ -1,3 +1,8 @@
+import { AuthProvider, useAuth } from "./lib/AuthProvider";
+import { LoginPage } from "./components/LoginPage";
+import { ProjectsPage } from "./components/ProjectsPage";
+import { ProjectPage } from "./components/ProjectPage";
+import { AccountsPage } from "./components/AccountsPage";
 import {
   createElement,
   useCallback,
@@ -69,11 +74,12 @@ function Status({ status }: { status: MeetingStatus }) {
   );
 }
 function Shell({ children }: { children: ReactNode }) {
+  const { account, logout } = useAuth();
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [dark, setDark] = useState(false);
   const navigation = [
-    ["/", "Tổng quan", LayoutDashboard],
-    ["/meetings", "Cuộc họp", FileAudio],
+    ["/projects", "Dự án", LayoutDashboard],
+
     ["/chat", "Tìm kiếm thông tin", Search],
     ["/voice-profiles", "Hồ sơ giọng nói", FileAudio],
     ["/settings", "Cài đặt", Settings],
@@ -98,8 +104,10 @@ function Shell({ children }: { children: ReactNode }) {
           </button>
         </div>
         <nav>
+          {account?.is_system_admin && <NavLink to="/accounts">Accounts</NavLink>}
+          <button onClick={() => void logout().catch(() => undefined)}>Đăng xuất</button>
           {navigation.map(([to, name, Icon]) => (
-            <NavLink key={to} to={to} end={to === "/"} aria-label={name} title={name}>
+            <NavLink key={to} to={to} end={to === "/projects"} aria-label={name} title={name}>
               {createElement(Icon as ComponentType<{ size?: number }>, {
                 size: 19,
               })}
@@ -810,12 +818,18 @@ function SettingsPage() {
     </div>
   );
 }
-export default function App() {
+function AuthenticatedApp() {
+  const { account, loading } = useAuth();
+  if (loading) return <main className="page" role="status">Đang tải phiên đăng nhập…</main>;
+  if (!account) return <LoginPage />;
   return (
     <Shell>
       <Routes>
-        <Route path="/" element={<Dashboard />} />
-        <Route path="/meetings" element={<Meetings />} />
+        <Route path="/" element={<ProjectsPage />} />
+        <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/projects/:id" element={<ProjectPage />} />
+        <Route path="/accounts" element={<AccountsPage />} />
+        <Route path="/meetings" element={<ProjectsPage />} />
         <Route path="/chat" element={<MeetingSearchChat />} />
         <Route path="/workspace/:id" element={<Workspace />} />
         <Route path="/voice-profiles" element={<VoiceProfilesPage />} />
@@ -824,3 +838,5 @@ export default function App() {
     </Shell>
   );
 }
+
+export default function App() { return <AuthProvider><AuthenticatedApp /></AuthProvider>; }

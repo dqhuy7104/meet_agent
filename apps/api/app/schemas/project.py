@@ -12,6 +12,7 @@ class ProjectResponse(BaseModel):
     id: str
     name: str
     is_archived: bool
+    role: Literal['system_admin', 'project_manager', 'member', 'viewer']
 
 class MembershipChange(BaseModel):
     role: ProjectRole

@@ -85,3 +85,5 @@ disabled accounts cannot authenticate. Login and registration share a PostgreSQL
 limit of 20 attempts per peer per 15 minutes. Authentication remains loopback-only.
 Set `AUTH_COOKIE_SECURE=true` for HTTPS; this rejects HTTP authentication requests.
 Public company-network deployment still requires a separate boundary review.
+
+The web client requires a local account session. Sign in or register, then open a project assigned by an administrator or project manager. Administrators create and archive projects and manage accounts; managers manage project members. Audio uploads from a project include its project ID. Session cookies remain HttpOnly, and the client attaches the session CSRF token to writes.

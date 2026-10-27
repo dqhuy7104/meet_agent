@@ -25,14 +25,16 @@ describe('voice API', () => {
     const options = fetch.mock.calls[0][1];
     expect(options.body).toBeInstanceOf(FormData);
     expect(options.body.get('file')).toBeInstanceOf(Blob);
-    expect(options.headers).toBeUndefined();
+    expect(options.headers.get("Content-Type")).toBeNull();
   });
   it('reads job states with abort support', async () => {
     const job = {id:'j',status:'failed',failure_code:'insufficient_speech'};
     const fetch = respond(job);
     const controller = new AbortController();
     expect(await voiceApi.job('j',controller.signal)).toEqual(job);
-    expect(fetch.mock.calls[0]).toEqual(['/api/voice-enrollment-jobs/j',{signal:controller.signal}]);
+    expect(fetch.mock.calls[0][0]).toBe('/api/voice-enrollment-jobs/j');
+    expect(fetch.mock.calls[0][1].signal).toBe(controller.signal);
+    expect(fetch.mock.calls[0][1].credentials).toBe('same-origin');
   });
   it('preserves FIFO order returned by API', async () => {
     respond([{id:9,fifo_position:1},{id:12,fifo_position:2}]);
