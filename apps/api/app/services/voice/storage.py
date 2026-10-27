@@ -9,14 +9,15 @@ from app.services.meetings.storage import audio_path, audio_publication_lock, in
 from app.services.voice.repository import EnrollmentJob, VoiceRepository
 
 
-def ingest_enrollment_upload(database: DatabaseSettings, data_dir: Path, profile_id: str, data: bytes) -> EnrollmentJob:
+def ingest_enrollment_upload(database: DatabaseSettings, data_dir: Path, profile_id: str, data: bytes,
+                             created_by_account_id: str | None = None) -> EnrollmentJob:
     with open_database(database) as connection:
         validate_database(connection)
         initialize_meeting_storage(data_dir, connection)
         with audio_publication_lock(data_dir):
             key = publish_audio(data_dir, data)
             try:
-                return VoiceRepository(connection).enqueue_upload(profile_id, key)
+                return VoiceRepository(connection).enqueue_upload(profile_id, key, created_by_account_id)
             except (psycopg.OperationalError, psycopg.InterfaceError):
                 # A lost acknowledgement may follow a successful commit.
                 with open_database(database) as recovery:

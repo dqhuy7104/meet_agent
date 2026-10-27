@@ -51,10 +51,12 @@ class EnrollmentJob:
     status: str
     attempt_count: int
     failure_code: str | None
+    created_by_account_id: str | None = None
+    project_id: str | None = None
 
 
 _JOB_COLUMNS = """id, profile_id, source, upload_key AS storage_key, source_meeting_id,
-    source_speaker, state AS status, attempt_count, failure_code"""
+    source_speaker, state AS status, attempt_count, failure_code, created_by_account_id, project_id"""
 
 
 _PROFILE_COLUMNS = """p.id, p.display_name, p.created_at, p.updated_at,
@@ -142,14 +144,15 @@ class VoiceRepository:
             profiles.setdefault(profile_id, []).append(json.loads(embedding))
         return profiles
 
-    def enqueue_upload(self, profile_id: str, storage_key: str) -> EnrollmentJob:
+    def enqueue_upload(self, profile_id: str, storage_key: str, created_by_account_id: str | None = None) -> EnrollmentJob:
         with self.connection.transaction():
             job_id = self.connection.execute(
-                "INSERT INTO voice_enrollment_jobs(profile_id,source,upload_key) VALUES (%s,'upload',%s) RETURNING id",
-                (profile_id, storage_key)).fetchone()[0]
+                "INSERT INTO voice_enrollment_jobs(profile_id,source,upload_key,created_by_account_id) VALUES (%s,'upload',%s,%s) RETURNING id",
+                (profile_id, storage_key, created_by_account_id)).fetchone()[0]
             return self.get_job(job_id)
 
-    def enqueue_from_meeting(self, profile_id: str, meeting_id: str, speaker: str) -> EnrollmentJob:
+    def enqueue_from_meeting(self, profile_id: str, meeting_id: str, speaker: str,
+                             created_by_account_id: str | None = None, project_id: str | None = None) -> EnrollmentJob:
         from app.services.voice.enrollment import EnrollmentError
         with self.connection.transaction():
             meeting = self.connection.execute(
@@ -159,8 +162,8 @@ class VoiceRepository:
                 (meeting_id, speaker)).fetchone():
                 raise EnrollmentError('source_changed')
             job_id = self.connection.execute(
-                """INSERT INTO voice_enrollment_jobs(profile_id,source,source_meeting_id,source_speaker)
-                   VALUES (%s,'meeting',%s,%s) RETURNING id""", (profile_id, meeting_id, speaker)).fetchone()[0]
+                """INSERT INTO voice_enrollment_jobs(profile_id,source,source_meeting_id,source_speaker,created_by_account_id,project_id)
+                   VALUES (%s,'meeting',%s,%s,%s,%s) RETURNING id""", (profile_id, meeting_id, speaker, created_by_account_id, project_id)).fetchone()[0]
             return self.get_job(job_id)
 
     def get_job(self, job_id: str) -> EnrollmentJob | None:
