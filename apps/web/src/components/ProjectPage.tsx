@@ -4,9 +4,26 @@ import { meetingApi } from '../lib/api';
 import { projectApi, type Project, type Membership } from '../lib/projectApi';
 import type { ApiMeeting } from '../types/meeting';
 export function ProjectPage() {
- const {id=''}=useParams();const [project,setProject]=useState<Project>();const [meetings,setMeetings]=useState<ApiMeeting[]>([]);const [members,setMembers]=useState<Membership[]>([]);const [error,setError]=useState('');
+ const {id=''}=useParams();
+ return <ProjectDetail key={id} id={id}/>;
+}
+function ProjectDetail({id}:{id:string}) {
+ const [project,setProject]=useState<Project>();const [meetings,setMeetings]=useState<ApiMeeting[]>([]);const [members,setMembers]=useState<Membership[]>([]);const [error,setError]=useState('');
  const canManage=project?.role==='system_admin'||project?.role==='project_manager';const canUpload=!!project&&!project.is_archived&&project.role!=='viewer';
- useEffect(()=>{setProject(undefined);setError('');void projectApi.get(id).then(value=>{setProject(value);if(value.role==='system_admin'||value.role==='project_manager')void projectApi.members(id).then(setMembers).catch(fail);}).catch(fail);void meetingApi.list(undefined,id).then(value=>setMeetings(value.items)).catch(fail);function fail(cause:Error){setError(cause.message);}},[id]);
+ useEffect(()=>{
+  const controller=new AbortController();
+  let isActive=true;
+  setProject(undefined);setMeetings([]);setMembers([]);setError('');
+  void projectApi.get(id,controller.signal).then(value=>{
+   if(!isActive)return;
+   setProject(value);
+   if(value.role==='system_admin'||value.role==='project_manager')
+    void projectApi.members(id,controller.signal).then(value=>{if(isActive)setMembers(value);}).catch(fail);
+  }).catch(fail);
+  void meetingApi.list(controller.signal,id).then(value=>{if(isActive)setMeetings(value.items);}).catch(fail);
+  function fail(cause:Error){if(isActive)setError(cause.message);}
+  return ()=>{isActive=false;controller.abort();};
+ },[id]);
  async function act(action:()=>Promise<unknown>) {setError('');try{await action();}catch(cause){setError((cause as Error).message);}}
  async function addMember(event:FormEvent<HTMLFormElement>) {event.preventDefault();if(!canManage)return;const data=new FormData(event.currentTarget);await act(async()=>{const target=await projectApi.lookup(id,String(data.get('email')));await projectApi.setMember(id,target.id,String(data.get('role')) as Membership['role']);setMembers(await projectApi.members(id));});}
  async function upload(event:FormEvent<HTMLFormElement>) {event.preventDefault();if(!canUpload)return;const data=new FormData(event.currentTarget);await act(async()=>{await meetingApi.upload(data.getAll('files') as File[],String(data.get('title')),id);setMeetings((await meetingApi.list(undefined,id)).items);});}
