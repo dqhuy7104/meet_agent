@@ -2,6 +2,8 @@ import unittest
 import httpx
 from fastapi import FastAPI
 from app.api.routes.chat import router
+from app.api.auth import require_account, require_csrf
+from app.services.access.repository import Account
 from app.api.deps import get_rag_service
 from app.core.rag_config import load_rag_settings, ProviderRegistry, RagError
 from test_rag_config import environment
@@ -13,9 +15,11 @@ class RoutesTest(unittest.IsolatedAsyncioTestCase):
         class Service:
             error = None
             registry = ProviderRegistry(settings)
-            async def catalog(inner):
+            async def catalog(inner, account_id):
+                self.assertEqual(account_id, 'reader')
                 return inner.registry.catalog(['p'])
-            async def query(inner, request):
+            async def query(inner, request, account_id):
+                self.assertEqual(account_id, 'reader')
                 inner.registry.resolve_chat(request.chat_provider_id, request.chat_model_id)
                 if request.k > settings.max_k:
                     raise RagError('invalid_k', 422)
@@ -23,7 +27,15 @@ class RoutesTest(unittest.IsolatedAsyncioTestCase):
         service = Service()
         app = FastAPI()
         app.include_router(router, prefix='/api')
-        app.dependency_overrides[get_rag_service] = lambda: service
+        async def account():
+            return Account('reader', 'reader@example.test', False, False)
+        async def csrf():
+            pass
+        app.dependency_overrides[require_account] = account
+        app.dependency_overrides[require_csrf] = csrf
+        async def get_service():
+            return service
+        app.dependency_overrides[get_rag_service] = get_service
         body = dict(question='private-question', k=1, chat_provider_id='local', chat_model_id='chat', embedding_profile_id='p')
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=('127.0.0.1',123)), base_url='http://localhost') as client:
             self.assertEqual((await client.get('/api/chat/providers')).status_code, 200)
