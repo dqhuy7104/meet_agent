@@ -110,3 +110,14 @@ The web client requires a local account session. Sign in or register, then open 
 Shared voice names are company-wide; meeting-derived samples and enrollment jobs still require access to their source project. Members can control their own unfinalized bot sessions. Revoking membership takes effect on subsequent resource checks. Archived projects remain readable and searchable and permit membership maintenance, while refusing new uploads and recordings. Chat defaults to all accessible projects; client meeting IDs only narrow that scope. Unassigned accounts see no meetings. Confirm a person's identity outside the app before granting access: registration does not verify email ownership.
 
 `/api/audio/process` remains a stateless, unauthenticated local API with its existing response contract. It does not read stored meetings. Keep API ports bound to loopback. Before company-network hosting, configure HTTPS, Secure cookies and trusted deployment origins, review every exposed endpoint (including stateless processing), and review proxy/Host/Origin handling. The current local guards intentionally reject remote peers; enabling Secure cookies alone does not enable network hosting.
+
+For password recovery, a trusted administrator with local database access must first
+confirm the person's identity outside the app; email ownership is unverified.
+Run `PYTHONPATH=apps/api uv run --env-file .env python -m app.commands.recover_password`
+on the local host (or through the API container, as with bootstrap). It prompts for
+the account email and a new password twice without echo. Never put passwords in
+arguments, environment variables or logs. The command changes only the existing
+account's password and revokes all its sessions in one transaction; it does not
+change roles or re-enable disabled accounts. Restrict host/database access to trusted
+operators and communicate the temporary credential privately; the user should then
+change it through their account. There is no public password reset endpoint.

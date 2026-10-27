@@ -21,6 +21,8 @@ it('discards delayed project, meeting and membership responses across route chan
  }));
  render(<MemoryRouter initialEntries={['/projects/a']}><Link to="/projects/b">Open B</Link><Link to="/projects/slow">Open slow</Link><Routes><Route path="/projects/:id" element={<ProjectPage/>}/></Routes></MemoryRouter>);
  await screen.findByText('Project A');
+ expect(screen.getByRole('note').textContent).toContain('Email ownership is unverified');
+ expect(screen.getByRole('note').textContent).toContain('Verify identity outside this app');
  fireEvent.click(screen.getByRole('link',{name:'Open B'}));
  await screen.findByText('Project B');
  await act(async()=>{oldMembers.resolve(response([{account_id:'old-account',project_id:'a',role:'member'}]));oldMeetings.resolve(response({items:[{id:'old-meeting',title:'Old meeting'}]}));});

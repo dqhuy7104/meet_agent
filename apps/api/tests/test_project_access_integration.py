@@ -91,6 +91,11 @@ class ProjectAccessIntegrationTest(PostgresAsyncTestCase):
             answer = await self.client.post('/api/chat/queries', json=self.query(meeting_ids=[visible, hidden]))
             self.assertEqual(answer.status_code, 200, answer.text)
             self.assertTrue({c['meeting_id'] for c in answer.json()['citations']} <= expected)
+            if allowed:
+                self.assertTrue(answer.json()['citations'], answer.text)
+                self.assertTrue(self.calls, 'Authorized query never reached generation provider')
+            else:
+                self.assertEqual(self.calls, [])
             if role != 'admin':
                 for path in (f'/api/meetings/{hidden}', f'/api/meetings/{hidden}/audio'):
                     response = await self.client.get(path)
@@ -152,3 +157,17 @@ class ProjectAccessIntegrationTest(PostgresAsyncTestCase):
         self.access.remove_membership(self.projects[1].id, self.accounts['manager'].id)
         self.assertEqual((await self.client.get(f'/api/bot-sessions/{bot}')).status_code, 404)
         self.assertEqual((await self.client.get(f'/api/voice-enrollment-jobs/{job}')).status_code, 404)
+
+    async def test_manager_cannot_demote_or_remove_disabled_manager(self):
+        target = self.accounts['viewer']
+        self.access.set_membership(self.projects[0].id, target.id, 'project_manager')
+        self.access.update_account(target.id, is_disabled=True)
+        self.sign_in('manager')
+        path = f'/api/projects/{self.projects[0].id}/members/{target.id}'
+        for role in ('member', 'viewer'):
+            response = await self.client.put(path, json={'role': role})
+            self.assertEqual(response.status_code, 403, response.text)
+        self.assertEqual((await self.client.delete(path)).status_code, 403)
+        self.assertEqual(next(m.role for m in self.access.members(self.projects[0].id) if m.account_id == target.id), 'project_manager')
+        self.sign_in('admin')
+        self.assertEqual((await self.client.put(path, json={'role':'viewer'})).status_code, 200)

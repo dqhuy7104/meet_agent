@@ -37,3 +37,12 @@ it('submits uploads and bot creation in the selected active project',async()=>{
  fireEvent.change(screen.getByLabelText('Audio'),{target:{files:[new File(['audio'],'recording.wav',{type:'audio/wav'})]}});fireEvent.submit(screen.getByRole('button',{name:'Tải audio'}).closest('form')!);await waitFor(()=>expect(fetcher.mock.calls.some(([url])=>url==='/api/meetings')).toBe(true));const upload=fetcher.mock.calls.find(([url])=>url==='/api/meetings');expect((upload?.[1]?.body as FormData).get('project_id')).toBe('p');
  fireEvent.change(screen.getByLabelText('Link Google Meet'),{target:{value:'https://meet.google.com/abc-defg-hij'}});fireEvent.click(screen.getByRole('button',{name:'Thêm Bot'}));await waitFor(()=>expect(fetcher.mock.calls.some(([url])=>url==='/api/bot-sessions')).toBe(true));const bot=fetcher.mock.calls.find(([url])=>url==='/api/bot-sessions');expect(JSON.parse(bot?.[1]?.body as string).project_id).toBe('p');expect(new Headers(bot?.[1]?.headers).get('X-CSRF-Token')).toBe('token');
 });
+it('warns administrators to verify identity before granting account access',async()=>{
+ const base=backend();vi.stubGlobal('fetch',vi.fn(async(url:string,options?:RequestInit)=>{
+  if(url==='/api/auth/session')return {ok:true,status:200,json:async()=>({account:{...account,is_system_admin:true},csrf_token:'token'})};
+  if(url==='/api/admin/accounts')return {ok:true,status:200,json:async()=>[account]};
+  return base(url,options);
+ }));render(<MemoryRouter initialEntries={['/accounts']}><App/></MemoryRouter>);
+ expect((await screen.findByRole('note')).textContent).toContain('Email ownership is unverified');
+ expect(screen.getByRole('note').textContent).toContain('Verify identity outside this app');
+});

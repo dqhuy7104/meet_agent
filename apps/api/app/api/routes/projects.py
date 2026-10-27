@@ -92,7 +92,9 @@ def authorize_membership_change(account: CurrentAccount, project_id: str, accoun
     target = repository.account_by_id(account_id)
     if target is None:
         raise HTTPException(404, 'Account not found')
-    if not account.is_system_admin and (role == 'project_manager' or repository.role(target, project_id) in {'project_manager', 'system_admin'}):
+    is_manager = any(member.account_id == account_id and member.role == 'project_manager'
+                     for member in repository.members(project_id))
+    if not account.is_system_admin and (role == 'project_manager' or target.is_system_admin or is_manager):
         raise HTTPException(403, 'Only system administrators manage managers')
 
 
