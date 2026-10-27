@@ -44,6 +44,7 @@ class RagRequestService:
         import psycopg
         from app.db.session import open_database, validate_database
         from app.services.meetings.repository import MeetingRepository
+        from app.services.access.repository import AccessRepository
         from app.services.rag.providers import ModelClient
         from app.services.rag.query import QueryService
         from app.services.rag.repository import RagRepository
@@ -60,6 +61,27 @@ class RagRequestService:
                     validate_database(connection)
                     repository = RagRepository(connection)
                     meetings = MeetingRepository(connection)
+                    access = AccessRepository(connection)
+                    account_id = arguments[-1]
+                    class Scope:
+                        def project_ids(inner):
+                            before_query()
+                            account = access.account_by_id(account_id)
+                            return [item.id for item in access.visible_projects(account)] if account else []
+                        def meeting_ids(inner, project_id=None):
+                            projects = inner.project_ids()
+                            if project_id is not None:
+                                if project_id not in projects:
+                                    raise RagError('project_not_found', 404)
+                                projects = [project_id]
+                            return [row[0] for row in connection.execute(
+                                "SELECT id FROM meetings WHERE status='completed' AND project_id=ANY(%s)",
+                                (projects,)).fetchall()]
+                        def can_read(inner, meeting_id):
+                            projects = inner.project_ids()
+                            return connection.execute(
+                                'SELECT 1 FROM meetings WHERE id=%s AND project_id=ANY(%s)',
+                                (meeting_id, projects)).fetchone() is not None
                     class Source:
                         def get_detail(inner, meeting_id):
                             before_query()
@@ -77,25 +99,25 @@ class RagRequestService:
                             return result
                     async with httpx.AsyncClient() as http:
                         client = ModelClient(self.registry, http, deadline.remaining)
-                        service = QueryService(self.settings, self.registry, Source(), Database(), client)
-                        return await getattr(service, action)(*arguments)
+                        service = QueryService(self.settings, self.registry, Source(), Database(), client, Scope())
+                        return await getattr(service, action)(*arguments[:-1])
             except (psycopg.Error, DatabaseUnavailableError):
                 deadline.remaining()
                 raise RagError('index_unavailable') from None
         return asyncio.run(run())
 
-    async def catalog(self):
-        return await self._invoke('catalog')
+    async def catalog(self, account_id: str):
+        return await self._invoke('catalog', account_id)
 
-    async def query(self, request: RagQuery):
+    async def query(self, request: RagQuery, account_id: str):
         self.registry.resolve_chat(request.chat_provider_id, request.chat_model_id)
         self.registry.resolve_profile(request.embedding_profile_id)
         if request.k > self.settings.max_k:
             raise RagError('invalid_k', 422)
-        return await self._invoke('query', request)
+        return await self._invoke('query', request, account_id)
 
-    async def summarize(self, meeting_id: str) -> dict[str, str]:
-        return await self._invoke('summarize', meeting_id)
+    async def summarize(self, meeting_id: str, account_id: str) -> dict[str, str]:
+        return await self._invoke('summarize', meeting_id, account_id)
 
-    async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str):
-        return await self._invoke('evaluation_state', profile_id, provider_id, model_id)
+    async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str, account_id: str):
+        return await self._invoke('evaluation_state', profile_id, provider_id, model_id, account_id)

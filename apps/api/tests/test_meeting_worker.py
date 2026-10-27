@@ -1,6 +1,7 @@
 """Worker state machine and failure contracts."""
 
 from __future__ import annotations
+from apps.api.tests.postgres_support import seed_project
 
 import hashlib
 import subprocess
@@ -39,6 +40,7 @@ def _result(text: str = "Xin chào") -> AudioProcessResponse:
 class MeetingWorkerTest(PostgresTestCase):
     def setUp(self) -> None:
         super().setUp()
+        self.account, self.project = seed_project(self.connection)
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.data_dir = Path(self.temporary.name) / "meetings"
@@ -53,7 +55,8 @@ class MeetingWorkerTest(PostgresTestCase):
         data = b"audio bytes"
         key = publish_audio(self.data_dir, data)
         self.repository.create_meeting(
-            meeting_id, "Planning", "meeting.wav", key, hashlib.sha256(data).hexdigest(), None
+            meeting_id, "Planning", "meeting.wav", key, hashlib.sha256(data).hexdigest(), None,
+            project_id=self.project.id, uploaded_by_account_id=self.account.id,
         )
 
     def test_claim_is_transactional_across_connections(self) -> None:
@@ -113,6 +116,7 @@ class MeetingWorkerTest(PostgresTestCase):
         self.repository.create_meeting(
             "multi", "Planning", "first.wav", first, "checksum", None,
             audio_files=[("first.wav", first), ("second.wav", second)],
+            project_id=self.project.id, uploaded_by_account_id=self.account.id,
         )
         self.repository.cancel("m1")
         with patch("app.services.meetings.worker.process_audio", side_effect=lambda data, name, models: _result(name)):
@@ -130,6 +134,7 @@ class MeetingWorkerTest(PostgresTestCase):
         self.repository.create_meeting(
             "multi", None, "first.wav", first, "checksum", None,
             audio_files=[("first.wav", first), ("second.wav", second)],
+            project_id=self.project.id, uploaded_by_account_id=self.account.id,
         )
         self.repository.cancel("m1")
         with patch("app.services.meetings.worker.process_audio", return_value=_result().model_copy(
@@ -147,6 +152,7 @@ class MeetingWorkerTest(PostgresTestCase):
         self.repository.create_meeting(
             "bot", None, "part.wav", first, "checksum", None,
             audio_files=[("first.wav", first), ("second.wav", second)], source="google_meet_bot",
+            project_id=self.project.id, uploaded_by_account_id=self.account.id,
         )
         self.connection.execute(
             "UPDATE meeting_audio_files SET start_seconds=CASE ordinal WHEN 0 THEN 0 ELSE 1200 END WHERE meeting_id='bot'"
@@ -262,13 +268,16 @@ class MeetingWorkerTest(PostgresTestCase):
 
 class RetryRouteTest(PostgresAsyncTestCase):
     async def test_retry_route_returns_404_409_or_queued(self) -> None:
+        from app.services.access.sessions import COOKIE_NAME, SessionRepository
+        self.account, self.project = seed_project(self.connection)
+        token, csrf = SessionRepository(self.connection).create(self.account.id)
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary) / "meetings"
             initialize_meeting_storage(data_dir, self.connection)
             connection = open_database(self.database)
             repository = MeetingRepository(connection)
             key = publish_audio(data_dir, b"audio")
-            repository.create_meeting("m1", None, "meeting.wav", key, "checksum", None)
+            repository.create_meeting("m1", None, "meeting.wav", key, "checksum", None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
 
             async def settings() -> Settings:
                 return Settings(meeting_data_dir=data_dir)
@@ -278,6 +287,8 @@ class RetryRouteTest(PostgresAsyncTestCase):
                 async with httpx.AsyncClient(
                     transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 4000)), base_url="http://localhost"
                 ) as client:
+                    client.cookies.set(COOKIE_NAME, token)
+                    client.headers['X-CSRF-Token'] = csrf
                     self.assertEqual((await client.post("/api/meetings/missing/retry")).status_code, 404)
                     self.assertEqual((await client.post("/api/meetings/m1/retry")).status_code, 409)
                     repository.claim_next()

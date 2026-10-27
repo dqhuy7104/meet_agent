@@ -31,6 +31,12 @@ class MeetingSearchTest(PostgresAsyncTestCase):
         self.client = httpx.AsyncClient(
             transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 4000)), base_url="http://localhost"
         )
+        from apps.api.tests.postgres_support import seed_project
+        from app.services.access.sessions import COOKIE_NAME, SessionRepository
+        account, self.project = seed_project(self.connection)
+        token, csrf = SessionRepository(self.connection).create(account.id)
+        self.client.cookies.set(COOKIE_NAME, token)
+        self.client.headers['X-CSRF-Token'] = csrf
 
     async def asyncTearDown(self) -> None:
         await self.client.aclose()
@@ -38,7 +44,7 @@ class MeetingSearchTest(PostgresAsyncTestCase):
 
     async def _upload(self, title: str = "Planning") -> str:
         response = await self.client.post(
-            "/api/meetings", files={"file": ("meeting.wav", b"audio", "audio/wav")}, data={"title": title}
+            "/api/meetings", files={"file": ("meeting.wav", b"audio", "audio/wav")}, data={"title": title, "project_id": self.project.id}
         )
         self.assertEqual(response.status_code, 202)
         return response.json()["meeting_id"]

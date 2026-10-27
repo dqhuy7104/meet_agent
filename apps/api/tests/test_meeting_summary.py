@@ -6,6 +6,8 @@ from fastapi import FastAPI
 
 from app.api.deps import get_rag_service
 from app.api.routes.chat import router
+from app.api.auth import require_account, require_csrf
+from app.services.access.repository import Account
 from app.core.rag_config import ProviderRegistry, RagError, load_rag_settings
 from app.services.llm.summarizer import summarize_transcript
 from app.services.rag.query import QueryService
@@ -52,7 +54,7 @@ class SummaryTest(unittest.IsolatedAsyncioTestCase):
         class Service:
             error = None
 
-            async def summarize(self, meeting_id):
+            async def summarize(self, meeting_id, account_id):
                 if self.error:
                     raise self.error
                 return dict(summary='Nội dung chính', provider_id='local', model_id='chat', prompt_version='meeting_summary_v1')
@@ -60,6 +62,12 @@ class SummaryTest(unittest.IsolatedAsyncioTestCase):
         service = Service()
         app = FastAPI()
         app.include_router(router, prefix='/api')
+        async def account():
+            return Account('reader', 'reader@example.test', False, False)
+        async def csrf():
+            pass
+        app.dependency_overrides[require_account] = account
+        app.dependency_overrides[require_csrf] = csrf
         async def override_service():
             return service
         app.dependency_overrides[get_rag_service] = override_service

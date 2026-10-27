@@ -10,7 +10,7 @@ from app.db.migrate import migrate_database
 from app.db.session import open_database, validate_database
 from app.services.meetings.repository import MeetingRepository
 from app.services.meetings.storage import initialize_meeting_storage
-from apps.api.tests.postgres_support import PostgresTestCase, PostgresAsyncTestCase, isolated_postgres
+from apps.api.tests.postgres_support import PostgresTestCase, PostgresAsyncTestCase, isolated_postgres, seed_project
 
 
 class ReviewDatabaseTest(PostgresTestCase):
@@ -37,7 +37,8 @@ class ReviewDatabaseTest(PostgresTestCase):
 
     def test_process_start_ticks_preserve_64_bit_identity(self):
         repository = MeetingRepository(self.connection)
-        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+        account, project = seed_project(self.connection)
+        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None, project_id=project.id, uploaded_by_account_id=account.id)
         repository.claim_next()
         self.assertTrue(repository.set_pipeline_process('m', 123, 2**33))
         self.assertEqual(repository.get_meeting('m').pipeline_start_ticks, 2**33)
@@ -58,7 +59,8 @@ class ReviewDatabaseTest(PostgresTestCase):
                 migrate_database(connection)
                 local_count = connection.execute("SELECT count(*) FROM information_schema.tables WHERE table_schema=%s AND table_name='meetings'", (fresh.schema,)).fetchone()[0]
                 self.assertEqual(local_count, 1)
-                MeetingRepository(connection).create_meeting('local', None, 'a.wav', 'b'*32, 'hash', None)
+                account, project = seed_project(connection)
+                MeetingRepository(connection).create_meeting('local', None, 'a.wav', 'b'*32, 'hash', None, project_id=project.id, uploaded_by_account_id=account.id)
                 self.assertEqual(MeetingRepository(self.connection).count_meetings(), 0)
 
 

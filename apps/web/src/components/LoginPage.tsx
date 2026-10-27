@@ -1,0 +1,7 @@
+import { useState, type FormEvent } from 'react';
+import { useAuth } from '../lib/AuthProvider';
+export function LoginPage() {
+ const {login,register}=useAuth(); const [isRegister,setRegister]=useState(false); const [error,setError]=useState(''); const [busy,setBusy]=useState(false);
+ async function submit(event:FormEvent<HTMLFormElement>) {event.preventDefault();const data=new FormData(event.currentTarget);setBusy(true);setError('');try {await (isRegister?register:login)(String(data.get('email')),String(data.get('password')));}catch(cause){setError(cause instanceof Error?cause.message:'Không thể đăng nhập.');}finally{setBusy(false);}}
+ return <main className="page"><h1>Meeting Agent</h1><h2>{isRegister?'Tạo tài khoản':'Đăng nhập'}</h2><form onSubmit={event=>void submit(event)} aria-describedby={error?'auth-error':undefined}><label>Email<input name="email" type="email" autoComplete="username" required /></label><label>Mật khẩu<input name="password" type="password" autoComplete={isRegister?'new-password':'current-password'} minLength={isRegister?12:1} required /></label>{isRegister&&<p>Mật khẩu ít nhất 12 ký tự. Quản trị viên sẽ thêm bạn vào dự án.</p>}{error&&<p id="auth-error" role="alert">{error}</p>}<button className="primary" disabled={busy}>{busy?'Đang xử lý…':isRegister?'Tạo tài khoản':'Đăng nhập'}</button></form><button onClick={()=>{setRegister(!isRegister);setError('');}}>{isRegister?'Quay lại đăng nhập':'Đăng ký'}</button></main>;
+}

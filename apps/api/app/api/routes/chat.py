@@ -6,6 +6,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from app.api.deps import get_rag_service
+from app.api.auth import CurrentAccount, require_account, require_csrf
 from app.api.routes.meetings import require_loopback
 from app.core.rag_config import RagError
 from app.schemas.chat import ProviderCatalog, RagAnswer, RagQuery, EvaluationState, MeetingSummary
@@ -35,22 +36,22 @@ router = APIRouter(prefix='/chat', tags=['chat'], route_class=SafeRagRoute,
 
 
 @router.get('/providers', response_model=ProviderCatalog)
-async def providers(service=Depends(get_rag_service)) -> ProviderCatalog:
-    return await service.catalog()
+async def providers(account: Annotated[CurrentAccount, Depends(require_account)], service=Depends(get_rag_service)) -> ProviderCatalog:
+    return await service.catalog(account.id)
 
 
-@router.post('/queries', response_model=RagAnswer)
-async def query(request: RagQuery, service=Depends(get_rag_service)) -> RagAnswer:
-    return await service.query(request)
+@router.post('/queries', response_model=RagAnswer, dependencies=[Depends(require_csrf)])
+async def query(request: RagQuery, account: Annotated[CurrentAccount, Depends(require_account)], service=Depends(get_rag_service)) -> RagAnswer:
+    return await service.query(request, account.id)
 
 
-@router.post('/meetings/{meeting_id}/summary', response_model=MeetingSummary)
+@router.post('/meetings/{meeting_id}/summary', response_model=MeetingSummary, dependencies=[Depends(require_csrf)])
 async def meeting_summary(meeting_id: Annotated[str, Path(min_length=1, max_length=200)],
-                          service=Depends(get_rag_service)) -> MeetingSummary:
-    return MeetingSummary.model_validate(await service.summarize(meeting_id))
+                          account: Annotated[CurrentAccount, Depends(require_account)], service=Depends(get_rag_service)) -> MeetingSummary:
+    return MeetingSummary.model_validate(await service.summarize(meeting_id, account.id))
 
 
 @router.get('/evaluation-state', response_model=EvaluationState)
 async def evaluation_state(embedding_profile_id: str, chat_provider_id: str, chat_model_id: str,
-                           service=Depends(get_rag_service)) -> dict:
-    return await service.evaluation_state(embedding_profile_id, chat_provider_id, chat_model_id)
+                           account: Annotated[CurrentAccount, Depends(require_account)], service=Depends(get_rag_service)) -> dict:
+    return await service.evaluation_state(embedding_profile_id, chat_provider_id, chat_model_id, account.id)

@@ -99,20 +99,21 @@ class RagRepository:
         row = self.connection.execute('SELECT ready FROM rag_embedding_profiles WHERE id=%s', (profile_id,)).fetchone()
         return bool(row and row[0])
 
-    def search(self, profile_id: str, question: str, vector: list[float], meeting_ids: list[str] | None) -> tuple[list[Candidate], list[Candidate]]:
+    def search(self, profile_id: str, question: str, vector: list[float], meeting_ids: list[str]) -> tuple[list[Candidate], list[Candidate]]:
         definition = self.connection.execute('SELECT definition FROM rag_embedding_profiles WHERE id=%s', (profile_id,)).fetchone()
         if not definition:
             raise RagError('profile_not_ready', 409)
         validate_vectors([vector], 1, definition[0]['dimensions'])
         if meeting_ids == []:
             return [], []
-        scope = '' if meeting_ids is None else ' AND c.meeting_id = ANY(%s)'
-        parameters = (json.dumps(vector), profile_id) + (() if meeting_ids is None else (meeting_ids,))
+        if meeting_ids is None:
+            raise ValueError('Authorized meeting IDs are required')
+        scope = ' AND c.meeting_id = ANY(%s)'
         # Materialize only this profile before cosine distance; dimensions may differ elsewhere.
         base = '''WITH scoped AS MATERIALIZED (SELECT c.payload,c.source_id,c.meeting_id,c.document,e.embedding FROM rag_chunks c
             JOIN rag_chunk_embeddings e USING(profile_id,source_id) WHERE c.profile_id=%s''' + scope + ''')
             , scored AS (SELECT *,1-(embedding <=> %s::vector) AS cosine FROM scoped)'''
-        parameters = (profile_id,) + (() if meeting_ids is None else (meeting_ids,)) + (json.dumps(vector),)
+        parameters = (profile_id, meeting_ids, json.dumps(vector))
         vectors = self.connection.execute(base + ''' SELECT payload,cosine FROM
             (SELECT *,row_number() OVER(PARTITION BY meeting_id ORDER BY cosine DESC,source_id) AS position FROM scored) diversified
             ORDER BY position,cosine DESC,source_id LIMIT 50''', parameters).fetchall()

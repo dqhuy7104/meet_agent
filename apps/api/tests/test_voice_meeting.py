@@ -1,3 +1,4 @@
+from apps.api.tests.postgres_support import seed_project
 from dataclasses import replace
 import tempfile
 from pathlib import Path
@@ -23,6 +24,7 @@ class VoiceMeetingTest(PostgresTestCase):
 
     def setUp(self):
         super().setUp()
+        self.account, self.project = seed_project(self.connection)
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         self.data_dir = Path(temporary.name)

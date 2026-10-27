@@ -31,6 +31,8 @@ class MeetingMetadataResponse(BaseModel):
     failure_code: str | None
     pipeline_pid: int | None
     source: str
+    project_id: str | None
+    uploaded_by_account_id: str | None
 
 
 class MeetingListResponse(BaseModel):

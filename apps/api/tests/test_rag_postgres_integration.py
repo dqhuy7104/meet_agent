@@ -23,6 +23,9 @@ class PostgresTest(unittest.TestCase):
         self.chunks = chunk_transcript(self.snapshot)
         self.repository.register_profiles([self.profile])
 
+    def meeting_ids(self):
+        return [row[0] for row in self.connection.execute('SELECT id FROM meetings')]
+
     def tearDown(self):
         pass
 
@@ -34,7 +37,7 @@ class PostgresTest(unittest.TestCase):
         with self.assertRaises(RagError):
             self.repository.publish(self.snapshot, self.profile, self.chunks, [[1.]])
         self.assertEqual(self.repository.manifest('p', self.snapshot.meeting_id), self.snapshot.revision)
-        vectors, texts = self.repository.search('p', 'Việt', [1., 0.], None)
+        vectors, texts = self.repository.search('p', 'Việt', [1., 0.], self.meeting_ids())
         self.assertEqual(texts[0].chunk.text, 'Kế hoạch phát hành Việt Nam')
         self.assertEqual(vectors[0].chunk.source_id, self.chunks[0].source_id)
         self.assertEqual(self.repository.search('p', 'Việt', [1., 0.], []), ([], []))
@@ -51,7 +54,7 @@ class PostgresTest(unittest.TestCase):
         self.snapshot = self.seed(replace(self.snapshot, segments=()))
         self.repository.publish(self.snapshot, self.profile, [], [])
         self.assertEqual(self.repository.manifest('p', self.snapshot.meeting_id), self.snapshot.revision)
-        self.assertEqual(self.repository.search('p', 'Việt', [1., 0.], None), ([], []))
+        self.assertEqual(self.repository.search('p', 'Việt', [1., 0.], self.meeting_ids()), ([], []))
 
     def test_failed_sql_batch_keeps_old_revision(self):
         self.repository.publish(self.snapshot, self.profile, self.chunks, [[1., 0.]])
@@ -67,11 +70,11 @@ class PostgresTest(unittest.TestCase):
             snapshot = make_snapshot(str(i), 'Title', (SourceSegment(0, 'Việt Nam', 'A', 0, 1),))
             snapshot = self.seed(snapshot)
             self.repository.publish(snapshot, self.profile, chunk_transcript(snapshot), [[1., 0.]])
-        a, b = self.repository.search('p', 'Việt', [1., 0.], None)
+        a, b = self.repository.search('p', 'Việt', [1., 0.], self.meeting_ids())
         self.assertEqual((len(a), len(b)), (50, 50))
         other = self.profile.model_copy(update={'id': 'other', 'dimensions': 3})
         self.repository.register_profiles([other])
-        self.assertEqual(self.repository.search('other', 'Việt', [1., 0., 0.], None), ([], []))
+        self.assertEqual(self.repository.search('other', 'Việt', [1., 0., 0.], self.meeting_ids()), ([], []))
 
     def test_sql_diversifies_before_global_limit(self):
         from app.services.rag.chunking import make_snapshot, chunk_transcript
@@ -82,7 +85,7 @@ class PostgresTest(unittest.TestCase):
             chunks=[replace(chunk_transcript(replace(snapshot,segments=(segment,)))[0],ordinal=i,source_id=meeting_id+':'+str(i)) for i,segment in enumerate(snapshot.segments)]
             snapshot = self.seed(snapshot)
             self.repository.publish(snapshot,self.profile,chunks,[vector for _ in chunks])
-        vector_hits,text_hits=self.repository.search('p','Việt',[1.,0.],None)
+        vector_hits,text_hits=self.repository.search('p','Việt',[1.,0.],self.meeting_ids())
         self.assertIn('B',{h.chunk.meeting_id for h in vector_hits})
         self.assertIn('B',{h.chunk.meeting_id for h in text_hits})
 

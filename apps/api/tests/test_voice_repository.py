@@ -6,12 +6,13 @@ import psycopg
 
 from app.services.meetings.repository import MeetingRepository
 from app.services.voice.repository import VoiceRepository
-from apps.api.tests.postgres_support import PostgresTestCase
+from apps.api.tests.postgres_support import PostgresTestCase, seed_project
 
 
 class VoiceRepositoryTest(PostgresTestCase):
     def setUp(self) -> None:
         super().setUp()
+        self.account, self.project = seed_project(self.connection)
         self.repository = VoiceRepository(self.connection)
         self.profile = self.repository.create_profile("Participant")
 
@@ -44,7 +45,8 @@ class VoiceRepositoryTest(PostgresTestCase):
         self.assertEqual([s.id for s in self.repository.list_samples(self.profile.id)], original_ids)
 
     def test_delete_profile_removes_samples_and_clears_names(self) -> None:
-        MeetingRepository(self.connection).create_meeting("m", None, "a.wav", "a" * 32, "hash", None)
+        MeetingRepository(self.connection).create_meeting("m", None, "a.wav", "a" * 32, "hash", None,
+                                                          project_id=self.project.id, uploaded_by_account_id=self.account.id)
         self.repository.add_sample(self.profile.id, [1.0, 0.0], "v1", "upload")
         self.connection.execute(
             "INSERT INTO meeting_speaker_identities(meeting_id,speaker,profile_id,origin) VALUES ('m','S0',%s,'manual')",
@@ -68,7 +70,16 @@ class VoiceRepositoryTest(PostgresTestCase):
         self.assertIsNone(self.repository.rename_profile("missing", "Name"))
 
     def test_source_meeting_deletion_removes_sample(self) -> None:
-        MeetingRepository(self.connection).create_meeting("m", None, "a.wav", "a" * 32, "hash", None)
+        MeetingRepository(self.connection).create_meeting("m", None, "a.wav", "a" * 32, "hash", None,
+                                                          project_id=self.project.id, uploaded_by_account_id=self.account.id)
         self.repository.add_sample(self.profile.id, [1.0, 0.0], "v1", "meeting", "m", "S0")
         self.connection.execute("DELETE FROM meetings WHERE id='m'")
         self.assertEqual(self.repository.list_samples(self.profile.id), [])
+
+    def test_upload_job_retains_creator_metadata(self) -> None:
+        from apps.api.tests.postgres_support import seed_project
+        account, _ = seed_project(self.connection)
+        job = self.repository.enqueue_upload(self.profile.id, 'a' * 32, account.id)
+        self.assertEqual(job.created_by_account_id, account.id)
+        self.assertIsNone(job.project_id)
+        self.assertEqual(self.repository.get_job(job.id).created_by_account_id, account.id)

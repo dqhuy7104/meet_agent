@@ -14,6 +14,7 @@ from app.db.session import open_database
 from app.services.meetings.storage import initialize_meeting_storage
 from apps.api.tests.postgres_support import PostgresTestCase, PostgresAsyncTestCase
 from app.services.meetings.bot_capture import RecordedPart
+from apps.api.tests.postgres_support import seed_project
 from app.services.meetings.bot_repository import BotSessionRepository
 from app.services.meetings.bot_runner import exclusive_bot_lock, run_session
 from app.services.meetings.meet_browser import JoinFailed
@@ -70,8 +71,9 @@ class BotRunnerTest(PostgresAsyncTestCase):
         self.connection = open_database(self.database)
         self.addCleanup(self.connection.close)
         self.repository = BotSessionRepository(self.connection, self.data_dir)
+        self.account, self.project = seed_project(self.connection)
         self.settings = Settings(meeting_data_dir=self.data_dir, bot_audio_sink="meet_bot")
-        self.session = self.repository.create("https://meet.google.com/abc-defg-hij", None, None)
+        self.session = self.repository.create("https://meet.google.com/abc-defg-hij", None, None, self.project.id, self.account.id)
         self.repository.claim_next()
 
     async def test_waiting_stop_creates_no_meeting_or_audio(self) -> None:

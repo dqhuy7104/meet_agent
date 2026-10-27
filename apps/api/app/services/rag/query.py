@@ -9,14 +9,19 @@ from app.services.llm.summarizer import PROMPT_VERSION as SUMMARY_PROMPT_VERSION
 
 
 class QueryService:
-    def __init__(self, settings: RagSettings, registry: ProviderRegistry, meetings, rag, client) -> None:
+    def __init__(self, settings: RagSettings, registry: ProviderRegistry, meetings, rag, client, access=None) -> None:
         self.settings, self.registry, self.meetings, self.rag, self.client = settings, registry, meetings, rag, client
+        self.access = access
 
     def eligible(self, chunk) -> bool:
+        if self.access and not self.access.can_read(chunk.meeting_id):
+            return False
         detail = self.meetings.get_detail(chunk.meeting_id)
         return bool(detail and detail.meeting.status == 'completed' and snapshot_meeting(detail).revision == chunk.revision)
 
     async def summarize(self, meeting_id: str) -> dict[str, str]:
+        if self.access and not self.access.can_read(meeting_id):
+            raise RagError('meeting_not_found', 404)
         detail = self.meetings.get_detail(meeting_id)
         if detail is None:
             raise RagError('meeting_not_found', 404)
@@ -26,18 +31,29 @@ class QueryService:
         if provider is None:
             raise RagError('chat_provider_not_configured')
         selection = self.registry.resolve_chat(provider.id, provider.chat_models[0].id)
-        summary = await summarize_transcript(detail.transcript_segments, selection, self.client)
-        current = self.meetings.get_detail(meeting_id)
-        if current is None or current.meeting.status != 'completed' or snapshot_meeting(current).revision != snapshot_meeting(detail).revision:
-            raise RagError('meeting_changed', 409)
+        revision = snapshot_meeting(detail).revision
+        def require_current_source():
+            if self.access and not self.access.can_read(meeting_id):
+                raise RagError('meeting_not_found', 404)
+            current = self.meetings.get_detail(meeting_id)
+            if current is None or current.meeting.status != 'completed' or snapshot_meeting(current).revision != revision:
+                raise RagError('meeting_changed', 409)
+
+        service = self
+        class SummaryClient:
+            async def generate(inner, selected, messages):
+                require_current_source()
+                return await service.client.generate(selected, messages)
+        summary = await summarize_transcript(detail.transcript_segments, selection, SummaryClient())
+        require_current_source()
         return dict(summary=summary, provider_id=provider.id, model_id=selection.model.id,
                     prompt_version=SUMMARY_PROMPT_VERSION)
 
-    async def ready(self, profile_id: str) -> bool:
+    async def ready(self, profile_id: str, meeting_ids: list[str] | None = None) -> bool:
         await self.rag.call('validate_profile', self.registry.resolve_profile(profile_id))
-        if not await self.rag.call('is_profile_ready', profile_id):
+        if self.access is None and not await self.rag.call('is_profile_ready', profile_id):
             return False
-        rows = self.meetings.completed_meeting_ids()
+        rows = meeting_ids if meeting_ids is not None else self.visible_meeting_ids()
         for row in rows:
             detail = self.meetings.get_detail(row)
             if detail and detail.meeting.status == 'completed':
@@ -45,6 +61,11 @@ class QueryService:
                 if await self.rag.call('manifest', profile_id, row) != snapshot.revision:
                     return False
         return True
+
+    def visible_meeting_ids(self, project_id: str | None = None) -> list[str]:
+        if self.access:
+            return self.access.meeting_ids(project_id)
+        return self.meetings.completed_meeting_ids()
 
     async def catalog(self):
         ready = []
@@ -64,10 +85,12 @@ class QueryService:
         if not await self.ready(profile_id):
             raise RagError('profile_not_ready', 409)
         revisions = {}
-        for row in self.meetings.completed_meeting_ids():
+        for row in self.visible_meeting_ids():
             detail = self.meetings.get_detail(row)
             if detail and detail.meeting.status == 'completed':
                 revisions[row] = snapshot_meeting(detail).revision
+        revisions = {key: value for key, value in revisions.items()
+                     if self.access is None or self.access.can_read(key)}
         return dict(meeting_revisions=revisions, embedding_profile=profile.model_dump(),
                     prompt_version=self.settings.prompt_version, prompt_hash=PROMPT_HASH,
                     chat_provider_id=provider_id, chat_model=selection.model.model_dump(),
@@ -79,14 +102,21 @@ class QueryService:
         profile = self.registry.resolve_profile(request.embedding_profile_id)
         if request.k > self.settings.max_k:
             raise RagError('invalid_k', 422)
-        if not await self.ready(profile.id):
-            raise RagError('profile_not_ready', 409)
-        if request.meeting_ids == []:
+        meeting_ids = self.visible_meeting_ids(request.project_id)
+        if request.meeting_ids is not None:
+            meeting_ids = [item for item in meeting_ids if item in request.meeting_ids]
+        if not meeting_ids:
             return insufficient(self.settings.prompt_version)
+        if not await self.ready(profile.id, meeting_ids):
+            raise RagError('profile_not_ready', 409)
         vector = (await self.client.embed(profile, [request.question]))[0]
-        vectors, texts = await self.rag.call('search', profile.id, request.question, vector, request.meeting_ids)
-        ranked = rank_candidates(request.question, [c for c in vectors if self.eligible(c.chunk)],
-                                 [c for c in texts if self.eligible(c.chunk)], self.settings.min_cosine_similarity)
+        current_ids = self.visible_meeting_ids(request.project_id)
+        meeting_ids = [item for item in meeting_ids if item in current_ids]
+        if not meeting_ids:
+            return insufficient(self.settings.prompt_version)
+        vectors, texts = await self.rag.call('search', profile.id, request.question, vector, meeting_ids)
+        ranked = rank_candidates(request.question, [c for c in vectors if c.chunk.meeting_id in meeting_ids and self.eligible(c.chunk)],
+                                 [c for c in texts if c.chunk.meeting_id in meeting_ids and self.eligible(c.chunk)], self.settings.min_cosine_similarity)
         overhead = sum(estimate_tokens(m['content']) + 16 for m in build_messages(request.question, [], self.settings.prompt_version))
         budget = selection.model.context_tokens - selection.model.output_tokens - overhead - 256
         sources = select_context(ranked, request.k, max(0, budget))

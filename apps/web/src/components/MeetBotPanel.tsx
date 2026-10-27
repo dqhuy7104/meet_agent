@@ -11,7 +11,7 @@ const labels: Record<BotStatus, string> = {
   interrupted: "Ghi âm bị gián đoạn", cancelled: "Đã hủy",
 };
 
-export function MeetBotPanel() {
+export function MeetBotPanel({projectId}: {projectId?: string}) {
   const [url, setUrl] = useState("");
   const [title, setTitle] = useState("");
   const [session, setSession] = useState<BotSession | null>(null);
@@ -25,12 +25,12 @@ export function MeetBotPanel() {
       if (active) return active;
       return botApi.recent(controller.signal);
     }).then((found) => {
-      if (!controller.signal.aborted && found) setSession(found);
+      if (!controller.signal.aborted && found && (!projectId || found.project_id === projectId)) setSession(found);
     }).catch((cause) => {
       if (!controller.signal.aborted) setError(cause instanceof ApiError ? cause.message : "Không tải được phiên bot local.");
     });
     return () => controller.abort();
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     if (!session || !activeStatuses.includes(session.status)) return;
@@ -54,7 +54,7 @@ export function MeetBotPanel() {
     setBusy(true);
     setError("");
     try {
-      setSession(await botApi.create(url, title));
+      setSession(await botApi.create(url, title, projectId));
       setUrl("");
     } catch (cause) {
       setError(cause instanceof ApiError ? cause.message : "Không kết nối được API local.");

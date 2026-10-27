@@ -2,13 +2,15 @@ import psycopg
 import tempfile
 import unittest
 from pathlib import Path
-from apps.api.tests.postgres_support import PostgresTestCase
+from apps.api.tests.postgres_support import PostgresTestCase, seed_project
 from app.services.meetings.repository import MeetingRepository
 from app.schemas.transcript import AudioProcessResponse, TranscriptSegment
 
 
 def complete_meeting(repository, meeting_id='m', text='Kế hoạch phát hành'):
-    repository.create_meeting(meeting_id, 'Planning', 'm.wav', meeting_id+'key', 'checksum', None)
+    account, project = seed_project(repository.connection)
+    repository.create_meeting(meeting_id, 'Planning', 'm.wav', meeting_id+'key', 'checksum', None,
+                              project_id=project.id, uploaded_by_account_id=account.id)
     repository.claim_next()
     repository.complete(meeting_id, AudioProcessResponse(filename="m.wav", duration_seconds=5, sample_rate=16000, transcript=text,
         vad_segments=[], diarization_segments=[], transcript_segments=[TranscriptSegment(start=1, end=4, speaker='A', text=text)] if text else []))
@@ -27,7 +29,9 @@ class OutboxTest(PostgresTestCase):
         self.assertEqual(self.repository.get_meeting('m').status, 'cancelled')
 
     def test_event_failure_rolls_back_completion(self):
-        self.repository.create_meeting('m', None, 'm.wav', 'key', 'hash', None)
+        account, project = seed_project(self.connection)
+        self.repository.create_meeting('m', None, 'm.wav', 'key', 'hash', None,
+                                       project_id=project.id, uploaded_by_account_id=account.id)
         self.repository.claim_next()
         self.connection.execute("ALTER TABLE rag_outbox ADD CHECK (kind <> 'index')")
         with self.assertRaises(psycopg.IntegrityError):

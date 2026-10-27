@@ -74,7 +74,10 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
         from dataclasses import replace
         profile=self.settings.profiles[0].model_copy(update={'dimensions':768})
         settings=replace(self.settings,profiles=(profile,))
-        self.meetings.create_meeting('long','Long','m.wav','key','hash',None)
+        from apps.api.tests.postgres_support import seed_project
+        account, project = seed_project(self.connection)
+        self.meetings.create_meeting('long','Long','m.wav','key','hash',None,
+                                    project_id=project.id, uploaded_by_account_id=account.id)
         self.meetings.claim_next()
         self.meetings.complete('long',AudioProcessResponse(filename='m.wav',duration_seconds=60,sample_rate=16000,transcript='text',vad_segments=[],diarization_segments=[],transcript_segments=[TranscriptSegment(start=i,end=i+1,speaker='A',text='word '*180) for i in range(30)]))
         batches=[]

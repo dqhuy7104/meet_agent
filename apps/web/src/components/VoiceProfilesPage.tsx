@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
+import { useAuth } from '../lib/AuthProvider';
+import { projectApi } from '../lib/projectApi';
 import { NavLink } from 'react-router-dom';
 import { meetingApi, type BackendMeeting } from '../lib/api';
 import { voiceApi, voiceError } from '../lib/voiceApi';
@@ -7,7 +9,7 @@ import type { ApiMeeting } from '../types/meeting';
 import type { EnrollmentJob, VoiceProfile, VoiceSample } from '../types/voice';
 import { VoiceEnrollmentJob } from './VoiceEnrollmentJob';
 
-function ProfileEditor({ profile, onChanged }: {profile: VoiceProfile; onChanged: () => void}) {
+function ProfileEditor({ profile, onChanged, canDelete }: {profile: VoiceProfile; onChanged: () => void; canDelete: boolean}) {
   const [name, setName] = useState(profile.display_name);
   const [samples, setSamples] = useState<VoiceSample[] | null>(null);
   const [meetings, setMeetings] = useState<ApiMeeting[]>([]);
@@ -51,9 +53,9 @@ function ProfileEditor({ profile, onChanged }: {profile: VoiceProfile; onChanged
     <form onSubmit={event => { event.preventDefault(); void run(async () => { await voiceApi.rename(profile.id, name.trim()); onChanged(); }); }}>
       <label>Tên người tham gia<input required maxLength={100} value={name} onChange={event => setName(event.target.value)} /></label>
       <button disabled={isBusy || !name.trim()}>Lưu tên</button>
-      <button type="button" disabled={isBusy} onClick={() => {
+      {canDelete && <button type="button" disabled={isBusy} onClick={() => {
         if (window.confirm(`Xóa hồ sơ “${profile.display_name}” và tất cả mẫu giọng nói?`)) void run(async () => { await voiceApi.remove(profile.id); onChanged(); });
-      }}>Xóa hồ sơ và mẫu</button>
+      }}>Xóa hồ sơ và mẫu</button>}
     </form>
     <h4>Mẫu giọng nói · {samples?.length ?? profile.sample_count}/5</h4>
     <p>Mẫu được xếp từ cũ nhất đến mới nhất. Xóa mẫu không thay đổi tên đã gán trong cuộc họp trước.</p>
@@ -62,7 +64,7 @@ function ProfileEditor({ profile, onChanged }: {profile: VoiceProfile; onChanged
       <div><b>#{sample.id} · {sample.source === 'upload' ? 'Audio tải lên' : `Cuộc họp · ${sample.source_speaker}`}</b>
       <small>{sample.source_meeting_id && <NavLink to={`/workspace/${encodeURIComponent(sample.source_meeting_id)}`}>Xem cuộc họp nguồn · </NavLink>}FIFO {sample.fifo_position} · {new Date(sample.created_at).toLocaleString('vi-VN')}</small>
       <small>Phiên bản: {sample.fingerprint}</small></div>
-      <button type="button" disabled={isBusy || isEnrolling} aria-label={`Xóa mẫu ${sample.id}`} onClick={() => void run(async () => { await voiceApi.removeSample(profile.id, sample.id); await refreshSamples(); onChanged(); })}>Xóa mẫu</button>
+      {canDelete && <button type="button" disabled={isBusy || isEnrolling} aria-label={`Xóa mẫu ${sample.id}`} onClick={() => void run(async () => { await voiceApi.removeSample(profile.id, sample.id); await refreshSamples(); onChanged(); })}>Xóa mẫu</button>}
     </li>)}</ol>}
     <h4>Thêm mẫu từ audio</h4>
     <p>Một người nói, ít nhất 10 giây lời nói riêng, audio tối đa 2 phút và 25 MiB. Audio mẫu được xóa sau xử lý.</p>
@@ -80,6 +82,10 @@ function ProfileEditor({ profile, onChanged }: {profile: VoiceProfile; onChanged
   </section>;
 }
 export function VoiceProfilesPage() {
+  const {account}=useAuth();
+  const [canManage,setCanManage]=useState(false);
+  useEffect(()=>{let active=true;void projectApi.list().then(projects=>{if(active)setCanManage(projects.some(project=>project.role === "project_manager"));}).catch(()=>{});return()=>{active=false;};},[]);
+  const canEdit=!!account?.is_system_admin || canManage;
   const [profiles, setProfiles] = useState<VoiceProfile[] | null>(null);
   const [selectedId, setSelectedId] = useState('');
   const [name, setName] = useState('');
@@ -94,12 +100,12 @@ export function VoiceProfilesPage() {
   return <div className="page voice-page">
     <section className="title"><div><h2>Hồ sơ giọng nói</h2><p>Thêm mẫu để nhận diện trong các cuộc họp mới. Cuộc họp cũ không tự nhận diện lại.</p></div></section>
     {error && <p className="message" role="alert">{error} <button onClick={() => void load()}>Thử lại</button></p>}
-    <form className="panel voice-create" onSubmit={event => { event.preventDefault(); setIsBusy(true); setError(''); void voiceApi.create(name.trim()).then(async profile => { setName(''); await load(); setSelectedId(profile.id); }).catch(cause => setError(voiceError(cause))).finally(() => setIsBusy(false)); }}>
+    {canEdit && <form className="panel voice-create" onSubmit={event => { event.preventDefault(); setIsBusy(true); setError(''); void voiceApi.create(name.trim()).then(async profile => { setName(''); await load(); setSelectedId(profile.id); }).catch(cause => setError(voiceError(cause))).finally(() => setIsBusy(false)); }}>
       <label>Tên người tham gia mới<input required maxLength={100} value={name} onChange={event => setName(event.target.value)} /></label><button className="primary" disabled={isBusy || !name.trim()}>Tạo hồ sơ</button>
-    </form>
+    </form>}
     {profiles === null ? <p>Đang tải hồ sơ…</p> : !profiles.length ? <p>Chưa có hồ sơ. Tạo người tham gia để bắt đầu.</p> : <div className="voice-layout">
       <section className="panel"><label>Chọn hồ sơ<select value={selectedId} onChange={event => setSelectedId(event.target.value)}>{profiles.map(profile => <option key={profile.id} value={profile.id}>{profile.display_name} ({profile.sample_count}/5 mẫu)</option>)}</select></label></section>
-      {selected && <ProfileEditor key={selected.id} profile={selected} onChanged={() => void load()} />}
+      {selected && canEdit && <ProfileEditor canDelete={!!account?.is_system_admin} key={selected.id} profile={selected} onChanged={() => void load()} />}
     </div>}
   </div>;
 }

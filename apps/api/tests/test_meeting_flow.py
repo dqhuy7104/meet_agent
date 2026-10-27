@@ -36,6 +36,10 @@ def _wav_bytes() -> bytes:
 
 class MeetingFlowTest(PostgresAsyncTestCase):
     async def test_upload_worker_search_audio_delete_and_legacy_response(self) -> None:
+        from apps.api.tests.postgres_support import seed_project
+        from app.services.access.sessions import COOKIE_NAME, SessionRepository
+        account, project = seed_project(self.connection)
+        token, csrf = SessionRepository(self.connection).create(account.id)
         with tempfile.TemporaryDirectory() as temporary:
             data_dir = Path(temporary) / "meetings"
             audio = _wav_bytes()
@@ -54,8 +58,10 @@ class MeetingFlowTest(PostgresAsyncTestCase):
                     transport=httpx.ASGITransport(app=app, client=("127.0.0.1", 4000)),
                     base_url="http://localhost",
                 ) as client:
+                    client.cookies.set(COOKIE_NAME, token)
+                    client.headers['X-CSRF-Token'] = csrf
                     uploaded = await client.post(
-                        "/api/meetings", files={"file": ("meeting.wav", audio, "audio/wav")}
+                        "/api/meetings", files={"file": ("meeting.wav", audio, "audio/wav")}, data={'project_id':project.id}
                     )
                     self.assertEqual(uploaded.status_code, 202)
                     meeting_id = uploaded.json()["meeting_id"]

@@ -10,6 +10,7 @@ class RagQuery(StrictModel):
     chat_provider_id: str = Field(min_length=1, max_length=200)
     chat_model_id: str = Field(min_length=1, max_length=200)
     embedding_profile_id: str = Field(min_length=1, max_length=200)
+    project_id: str | None = Field(default=None, min_length=1, max_length=200)
     meeting_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] | None = Field(default=None, max_length=100)
 
     @field_validator('question', mode='before')

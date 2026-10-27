@@ -7,6 +7,8 @@ from unittest.mock import patch
 import httpx
 from fastapi import FastAPI
 from app.api.routes.chat import router
+from app.api.auth import require_account
+from app.services.access.repository import Account, AccessRepository
 from app.core.rag_config import RagError
 from test_rag_config import environment
 
@@ -18,6 +20,9 @@ class DeadlineTest(unittest.IsolatedAsyncioTestCase):
             release.wait(1)
             raise RagError('index_unavailable')
         app=FastAPI();app.include_router(router,prefix='/api')
+        async def account():
+            return Account('reader', 'reader@example.test', False, False)
+        app.dependency_overrides[require_account] = account
         try:
             with patch.dict(os.environ,environment()),patch('app.db.session.open_database',side_effect=blocked),patch('app.api.routes.chat.QUERY_TIMEOUT_SECONDS',.05,create=True):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app,client=('127.0.0.1',1)),base_url='http://localhost') as client:
@@ -41,6 +46,10 @@ class DeadlineTest(unittest.IsolatedAsyncioTestCase):
             return None
         app = FastAPI()
         app.include_router(router, prefix='/api')
+        account_id = fixture.connection.execute('SELECT uploaded_by_account_id FROM meetings LIMIT 1').fetchone()[0]
+        async def account():
+            return AccessRepository(fixture.connection).account_by_id(account_id)
+        app.dependency_overrides[require_account] = account
         try:
             with patch.dict(os.environ, env), patch('app.services.rag.repository.RagRepository.validate_profile'), patch('app.services.rag.repository.RagRepository.is_profile_ready', return_value=True), patch.object(MeetingRepository, 'get_detail', side_effect=blocked_source), patch('app.api.routes.chat.QUERY_TIMEOUT_SECONDS', .05):
                 async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=('127.0.0.1', 1)), base_url='http://localhost') as client:

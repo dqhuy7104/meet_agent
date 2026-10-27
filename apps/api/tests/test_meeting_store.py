@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from functools import partial
 import psycopg
 import stat
 import tempfile
@@ -10,7 +11,7 @@ import unittest
 from pathlib import Path
 
 from app.core.config import ConfigurationError, Settings
-from apps.api.tests.postgres_support import PostgresTestCase
+from apps.api.tests.postgres_support import PostgresTestCase, seed_project
 from app.services.meetings.storage import initialize_meeting_storage
 from app.services.meetings.repository import IdempotencyConflict, MeetingRepository
 from app.services.meetings.storage import audio_path, cleanup_orphaned_audio, publish_audio
@@ -22,6 +23,8 @@ class MeetingStoreTest(PostgresTestCase):
         super().setUp()
         initialize_meeting_storage(self.data_dir, self.connection)
         self.repository = MeetingRepository(self.connection)
+        self.account, self.project = seed_project(self.connection)
+        self.create_meeting = partial(self.repository.create_meeting, project_id=self.project.id, uploaded_by_account_id=self.account.id)
 
     def test_initialization_is_idempotent_and_private(self) -> None:
         initialize_meeting_storage(self.data_dir, self.connection)
@@ -42,7 +45,7 @@ class MeetingStoreTest(PostgresTestCase):
     def test_cleanup_removes_orphans_but_keeps_referenced_audio(self) -> None:
         kept = publish_audio(self.data_dir, b"kept")
         orphan = publish_audio(self.data_dir, b"orphan")
-        self.repository.create_meeting("m1", None, "user/meeting.wav", kept, hashlib.sha256(b"kept").hexdigest(), None)
+        self.create_meeting("m1", None, "user/meeting.wav", kept, hashlib.sha256(b"kept").hexdigest(), None)
         (self.data_dir / "tmp" / "abandoned").write_bytes(b"partial")
         cleanup_orphaned_audio(self.data_dir, self.repository)
         self.assertTrue(audio_path(self.data_dir, kept).exists())
@@ -53,16 +56,16 @@ class MeetingStoreTest(PostgresTestCase):
         key = publish_audio(self.data_dir, b"unlinked")
         self.connection.execute("DROP TABLE meetings CASCADE")
         with self.assertRaises(psycopg.errors.UndefinedTable):
-            self.repository.create_meeting("m1", None, "original.wav", key, "checksum", None)
+            self.create_meeting("m1", None, "original.wav", key, "checksum", None)
         audio_path(self.data_dir, key).unlink()
         self.assertFalse(audio_path(self.data_dir, key).exists())
 
     def test_duplicate_idempotency_key_is_distinct_conflict(self) -> None:
         first = publish_audio(self.data_dir, b"first")
         second = publish_audio(self.data_dir, b"second")
-        self.repository.create_meeting("m1", "first", "a.wav", first, "checksum1", "retry-key")
+        self.create_meeting("m1", "first", "a.wav", first, "checksum1", "retry-key")
         with self.assertRaises(IdempotencyConflict):
-            self.repository.create_meeting("m2", "second", "b.wav", second, "checksum2", "retry-key")
+            self.create_meeting("m2", "second", "b.wav", second, "checksum2", "retry-key")
         self.assertEqual(self.repository.get_meeting("m1").title, "first")
         self.assertIsNone(self.repository.get_meeting("m2"))
 
@@ -72,7 +75,7 @@ class MeetingStoreTest(PostgresTestCase):
 
     def test_cancelled_meeting_retains_metadata_and_clears_results(self) -> None:
         key = publish_audio(self.data_dir, b"audio")
-        self.repository.create_meeting("m1", "Planning", "meeting.wav", key, "checksum", None)
+        self.create_meeting("m1", "Planning", "meeting.wav", key, "checksum", None)
         self.repository.claim_next()
         self.repository.complete("m1", AudioProcessResponse(
             filename="meeting.wav", duration_seconds=1.0, transcript="Xin chào",
