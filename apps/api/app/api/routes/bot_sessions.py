@@ -56,7 +56,7 @@ def _response(repository: BotSessionRepository, session: BotSession) -> BotSessi
     else:
         count = len(repository.parts(session.id))
     return BotSessionResponse(
-        id=session.id, status=session.status, failure_code=session.failure_code,
+        id=session.id, project_id=session.project_id, status=session.status, failure_code=session.failure_code,
         created_at=session.created_at, started_at=session.started_at, ended_at=session.ended_at,
         finalized_part_count=count, capture_incomplete=session.capture_incomplete,
         meeting_id=session.meeting_id, stop_requested=session.stop_requested,

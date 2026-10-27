@@ -48,6 +48,7 @@ class BotSessionRouteTest(PostgresAsyncTestCase):
             "project_id": self.project.id, "url": "https://meet.google.com/abc-defg-hij?authuser=1#frag", "title": "Planning"
         })
         self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.json()["project_id"], self.project.id)
         session = self.repository.get(response.json()["id"])
         self.assertEqual(session.url, "https://meet.google.com/abc-defg-hij")
         self.assertNotIn("url", response.json())

@@ -1,4 +1,4 @@
-import { ApiError } from "./api";
+import { request as sessionRequest } from "./api";
 
 export type BotStatus =
   | "queued" | "joining" | "waiting_admission" | "recording"
@@ -6,6 +6,7 @@ export type BotStatus =
 
 export type BotSession = {
   id: string;
+  project_id?: string;
   status: BotStatus;
   failure_code: string | null;
   created_at: string;
@@ -18,19 +19,13 @@ export type BotSession = {
 };
 
 async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const response = await fetch(`/api/bot-sessions${path}`, options);
-  if (!response.ok) {
-    const body = await response.json().catch(() => null) as { detail?: unknown } | null;
-    const message = typeof body?.detail === "string" ? body.detail : "Không thể điều khiển bot ghi âm local.";
-    throw new ApiError(response.status, message);
-  }
-  return response.status === 204 ? undefined as T : response.json() as Promise<T>;
+  return sessionRequest<T>(`/api/bot-sessions${path}`, options);
 }
 
 export const botApi = {
-  create: (url: string, title: string) => request<BotSession>("", {
+  create: (url: string, title: string, projectId?: string) => request<BotSession>("", {
     method: "POST", headers: { "Content-Type": "application/json", "Idempotency-Key": crypto.randomUUID() },
-    body: JSON.stringify({ url, title: title || null }),
+    body: JSON.stringify({ url, title: title || null, project_id: projectId }),
   }),
   active: (signal?: AbortSignal) => request<BotSession | undefined>("/active", { signal }),
   recent: (signal?: AbortSignal) => request<BotSession | undefined>("/recent", { signal }),

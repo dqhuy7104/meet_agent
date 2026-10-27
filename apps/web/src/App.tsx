@@ -1,3 +1,4 @@
+import { projectApi, type Project } from "./lib/projectApi";
 import { AuthProvider, useAuth } from "./lib/AuthProvider";
 import { LoginPage } from "./components/LoginPage";
 import { ProjectsPage } from "./components/ProjectsPage";
@@ -536,6 +537,8 @@ function Workspace() {
   return <LocalWorkspace id={id} />;
 }
 function LocalWorkspace({ id }: { id: string }) {
+  const { account } = useAuth();
+  const [project,setProject] = useState<Project>();
   const [searchParams] = useSearchParams();
   const requestedTime = searchParams.get("t");
   const locationSeek = useRef("");
@@ -555,6 +558,8 @@ function LocalWorkspace({ id }: { id: string }) {
       try {
         const result = await meetingApi.get(id, signal);
         setMeeting(result);
+        setProject(undefined);
+        if (result.project_id) { const project = await projectApi.get(result.project_id,signal); if (!signal?.aborted) setProject(project); }
         setError("");
         return result;
       } catch (cause) {
@@ -684,10 +689,10 @@ function LocalWorkspace({ id }: { id: string }) {
           <h2>{title(meeting)}</h2>
         </div>
         <Status status={meeting.status} />
-        <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting}>
+        {(account?.is_system_admin || project?.role === "project_manager" || (project?.role === "member" && meeting.source === "upload" && meeting.uploaded_by_account_id === account?.id)) && <button className="meeting-delete" onClick={() => void remove()} disabled={isDeleting}>
           <Trash2 size={16} />
           {isDeleting ? "Đang xóa..." : "Xóa"}
-        </button>
+        </button>}
       </section>
       {deleteError && <p className="message" role="alert">{deleteError}</p>}
       {meeting.status !== "completed" ? (
@@ -785,6 +790,7 @@ function LocalWorkspace({ id }: { id: string }) {
             </div>
             <div className="insight-body">
               <MeetingSpeakerIdentities
+                canEdit={!!account?.is_system_admin || project?.role === "project_manager"}
                 meetingId={id}
                 speakers={[...new Set(meeting.diarization_segments.map(turn => turn.speaker))]}
                 identities={meeting.speaker_identities ?? []}

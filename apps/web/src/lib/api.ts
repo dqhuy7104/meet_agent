@@ -8,6 +8,7 @@ export type BackendSegment = { start: number; end: number; speaker: string; text
 export type BackendMeeting = ApiMeeting & { voice_identification_status: VoiceIdentificationStatus; speaker_identities: SpeakerIdentity[]; failure_code: string | null; transcript: string | null; vad_segments: {start:number;end:number}[]; diarization_segments: {start:number;end:number;speaker:string}[]; transcript_segments: BackendSegment[]; audio_files: { ordinal: number; original_filename: string; duration_seconds: number | null; start_seconds: number | null }[] };
 export type MeetingSummary = { summary: string; provider_id: string; model_id: string; prompt_version: string };
 export class ApiError extends Error { constructor(public status: number, message: string) { super(message); } }
+export function accessError(status: number): string | undefined { return status === 401 ? "Phiên đã hết hạn. Vui lòng đăng nhập lại." : status === 403 ? "Bạn không có quyền thực hiện thao tác này. Liên hệ quản lý dự án." : undefined; }
 let csrfToken: string | null = null;
 export function setCsrfToken(value: string | null): void { csrfToken = value; }
 export function sessionOptions(options: RequestInit = {}): RequestInit {
@@ -18,7 +19,7 @@ export function sessionOptions(options: RequestInit = {}): RequestInit {
 export function expireSession(status: number): void { if (status === 401 && typeof window !== "undefined") window.dispatchEvent(new Event("session-expired")); }
 export async function request<T>(url: string, options?: RequestInit): Promise<T> {
   const response = await fetch(url, sessionOptions(options));
-  if (!response.ok) { expireSession(response.status); const body = await response.json().catch(() => null) as { detail?: string } | null; throw new ApiError(response.status, body?.detail ?? "Không thể kết nối thư viện meeting local."); }
+  if (!response.ok) { expireSession(response.status); const body = await response.json().catch(() => null) as { detail?: string } | null; throw new ApiError(response.status, accessError(response.status) ?? body?.detail ?? "Không thể kết nối thư viện meeting local."); }
   return response.status === 204 ? undefined as T : response.json() as Promise<T>;
 }
 export const meetingApi = {

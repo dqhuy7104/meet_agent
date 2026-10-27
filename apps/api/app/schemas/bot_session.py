@@ -10,6 +10,7 @@ class BotSessionCreate(BaseModel):
 
 
 class BotSessionResponse(BaseModel):
+    project_id: str | None = None
     id: str
     status: str
     failure_code: str | None

@@ -35,8 +35,8 @@ function SpeakerEditor({meetingId, speaker, identities, profiles, onCorrected, o
     {job && <VoiceEnrollmentJob job={job} onCompleted={onEnrolled} onFinished={() => setIsEnrolling(false)} />}
   </section>;
 }
-export function MeetingSpeakerIdentities({meetingId, speakers, identities, status, onCorrected}: {
-  meetingId: string; speakers: string[]; identities: SpeakerIdentity[]; status: VoiceIdentificationStatus;
+export function MeetingSpeakerIdentities({meetingId, speakers, identities, status, onCorrected, canEdit = false}: {
+  canEdit?: boolean; meetingId: string; speakers: string[]; identities: SpeakerIdentity[]; status: VoiceIdentificationStatus;
   onCorrected: (identity: SpeakerIdentity) => void;
 }) {
   const [profiles, setProfiles] = useState<VoiceProfile[]>([]);
@@ -52,6 +52,7 @@ export function MeetingSpeakerIdentities({meetingId, speakers, identities, statu
     <NavLink to="/voice-profiles">Quản lý hồ sơ giọng nói</NavLink>
     {error && <p role="alert">{error} <button onClick={() => void load()}>Tải lại hồ sơ</button></p>}
     {!profiles.length && !error && <p>Tạo hồ sơ trước khi gán tên hoặc thêm mẫu.</p>}
-    {speakers.map(speaker => <SpeakerEditor key={`${meetingId}:${speaker}`} meetingId={meetingId} speaker={speaker} identities={identities} profiles={profiles} onCorrected={onCorrected} onEnrolled={() => void load()} />)}
+    {!canEdit && speakers.map(speaker => <p key={speaker}>{speakerDisplay(speaker, identities).name} · {speaker}</p>)}
+    {canEdit && speakers.map(speaker => <SpeakerEditor key={`${meetingId}:${speaker}`} meetingId={meetingId} speaker={speaker} identities={identities} profiles={profiles} onCorrected={onCorrected} onEnrolled={() => void load()} />)}
   </section>;
 }
