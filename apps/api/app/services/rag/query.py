@@ -31,18 +31,21 @@ class QueryService:
         if provider is None:
             raise RagError('chat_provider_not_configured')
         selection = self.registry.resolve_chat(provider.id, provider.chat_models[0].id)
+        revision = snapshot_meeting(detail).revision
+        def require_current_source():
+            if self.access and not self.access.can_read(meeting_id):
+                raise RagError('meeting_not_found', 404)
+            current = self.meetings.get_detail(meeting_id)
+            if current is None or current.meeting.status != 'completed' or snapshot_meeting(current).revision != revision:
+                raise RagError('meeting_changed', 409)
+
         service = self
         class SummaryClient:
             async def generate(inner, selected, messages):
-                if service.access and not service.access.can_read(meeting_id):
-                    raise RagError('meeting_not_found', 404)
+                require_current_source()
                 return await service.client.generate(selected, messages)
         summary = await summarize_transcript(detail.transcript_segments, selection, SummaryClient())
-        if self.access and not self.access.can_read(meeting_id):
-            raise RagError('meeting_not_found', 404)
-        current = self.meetings.get_detail(meeting_id)
-        if current is None or current.meeting.status != 'completed' or snapshot_meeting(current).revision != snapshot_meeting(detail).revision:
-            raise RagError('meeting_changed', 409)
+        require_current_source()
         return dict(summary=summary, provider_id=provider.id, model_id=selection.model.id,
                     prompt_version=SUMMARY_PROMPT_VERSION)
 

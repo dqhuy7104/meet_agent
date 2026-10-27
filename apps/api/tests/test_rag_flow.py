@@ -165,3 +165,22 @@ class ScopedQueryTest(unittest.IsolatedAsyncioTestCase):
         self.service.client.generate = generate
         with self.assertRaisesRegex(RagError, 'meeting_not_found'):
             await self.service.summarize('a')
+
+    async def test_summary_stops_before_second_dispatch_when_source_changes(self):
+        from app.core.rag_config import RagError
+        for change in ['cancelled', 'revision']:
+            with self.subTest(change=change):
+                self.details['a'].meeting.status = 'completed'
+                self.details['a'].transcript_segments[0].text = 'Nội dung ' * 5000
+                calls = []
+                async def generate(*args):
+                    calls.append(1)
+                    if change == 'cancelled':
+                        self.details['a'].meeting.status = 'cancelled'
+                    else:
+                        self.details['a'].transcript_segments[0].text = 'changed transcript'
+                    return '{"summary":"partial summary"}'
+                self.service.client.generate = generate
+                with self.assertRaisesRegex(RagError, 'meeting_changed'):
+                    await self.service.summarize('a')
+                self.assertEqual(len(calls), 1)
