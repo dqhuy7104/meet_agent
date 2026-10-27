@@ -1,3 +1,4 @@
+from apps.api.tests.postgres_support import seed_project
 import multiprocessing
 import threading
 import time
@@ -22,10 +23,14 @@ def complete_without_models(meeting_id, data_dir, settings, database, start_even
 
 
 class WorkerSupervisionTest(PostgresTestCase):
+    def setUp(self):
+        super().setUp()
+        self.account, self.project = seed_project(self.connection)
+
     def test_spawned_child_uses_its_own_schema_connection(self):
         initialize_meeting_storage(self.data_dir, self.connection)
         repository = MeetingRepository(self.connection)
-        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         context = multiprocessing.get_context('spawn')
         make_process = context.Process
         def process(**kwargs):
@@ -38,7 +43,7 @@ class WorkerSupervisionTest(PostgresTestCase):
     def test_lost_lease_reaps_child_before_new_ownership(self):
         initialize_meeting_storage(self.data_dir, self.connection)
         repository = MeetingRepository(self.connection)
-        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         with worker_lease(self.database, 'meeting') as lease:
             def disconnect():
                 with self.open_connection() as connection:
@@ -78,10 +83,14 @@ def completion_connection_failure(meeting_id, data_dir, settings, database, star
 
 
 class ChildConnectionFailureTest(PostgresTestCase):
+    def setUp(self):
+        super().setUp()
+        self.account, self.project = seed_project(self.connection)
+
     def test_failed_child_connection_does_not_strand_processing(self):
         initialize_meeting_storage(self.data_dir, self.connection)
         repository = MeetingRepository(self.connection)
-        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None)
+        repository.create_meeting('m', None, 'a.wav', 'a'*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         context = multiprocessing.get_context('spawn')
         make_process = context.Process
         def process(**kwargs):
@@ -107,6 +116,10 @@ def complete_either_queue(job_id, data_dir, settings, database, start_event, own
 
 
 class QueueSelectionTest(PostgresTestCase):
+    def setUp(self):
+        super().setUp()
+        self.account, self.project = seed_project(self.connection)
+
     def test_alternating_selector_runs_enrollment_between_meetings(self):
         from app.services.voice.repository import VoiceRepository
         from app.services.voice.storage import ingest_enrollment_upload
@@ -116,7 +129,7 @@ class QueueSelectionTest(PostgresTestCase):
         profile = voices.create_profile('Participant')
         job = ingest_enrollment_upload(self.database, self.data_dir, profile.id, b'audio')
         for name in ('first', 'second'):
-            meetings.create_meeting(name, None, 'a.wav', name[0]*32, 'hash', None)
+            meetings.create_meeting(name, None, 'a.wav', name[0]*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         context = multiprocessing.get_context('spawn')
         make_process = context.Process
         def process(**kwargs):

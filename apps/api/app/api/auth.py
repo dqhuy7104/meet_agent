@@ -25,10 +25,13 @@ def require_account(request: Request, repository: Annotated[SessionRepository, D
     account = repository.resolve(token) if token else None
     if account is None:
         raise HTTPException(401, 'Authentication required')
-    request.state.csrf_token = repository.csrf(token)
+    csrf = repository.csrf(token)
+    if csrf is None:
+        raise HTTPException(401, 'Authentication required')
+    request.state.csrf_token = csrf
     return account
 
 
 def require_csrf(request: Request, account: Annotated[CurrentAccount, Depends(require_account)]) -> None:
-    if not secrets.compare_digest(request.headers.get('X-CSRF-Token', ''), request.state.csrf_token):
+    if not secrets.compare_digest(request.headers.get('X-CSRF-Token', '').encode(), request.state.csrf_token.encode()):
         raise HTTPException(403, 'Invalid CSRF token')

@@ -13,9 +13,14 @@ from apps.api.tests.postgres_support import PostgresAsyncTestCase
 
 class DatabaseRoutesTest(PostgresAsyncTestCase):
     async def asyncSetUp(self):
+        from apps.api.tests.postgres_support import seed_project
+        from app.services.access.sessions import COOKIE_NAME, SessionRepository
+        account, _ = seed_project(self.connection)
         app.dependency_overrides[get_meeting_settings] = lambda: Settings(meeting_data_dir=self.data_dir)
         self.client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app, client=('127.0.0.1', 1)), base_url='http://localhost')
         self.addAsyncCleanup(self.client.aclose)
+        token, _ = SessionRepository(self.connection).create(account.id)
+        self.client.cookies.set(COOKIE_NAME, token)
 
     async def test_database_failure_is_safe_503(self):
         def missing():

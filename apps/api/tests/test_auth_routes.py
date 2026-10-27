@@ -123,3 +123,27 @@ class AuthRoutesTest(PostgresAsyncTestCase):
                     self.assertEqual(change.result(timeout=5).status_code, 204)
         self.assertEqual(self.connection.execute('SELECT count(*) FROM auth_sessions WHERE account_id=%s', (account.id,)).fetchone()[0], 0,
                          'Old-password login created a session that survived password-change revocation')
+
+
+class AuthDependencyTest(unittest.TestCase):
+    def test_revoked_between_identity_and_csrf_is_unauthorized(self):
+        from unittest.mock import Mock
+        from fastapi import HTTPException, Request
+        from app.api.auth import require_account
+        from app.services.access.repository import Account
+        repository = Mock()
+        repository.resolve.return_value = Account('id', 'email@example.test', False, False)
+        repository.csrf.return_value = None
+        request = Request({'type':'http', 'headers':[(b'cookie', b'meeting_session=token')]})
+        with self.assertRaises(HTTPException) as raised:
+            require_account(request, repository, None)
+        self.assertEqual(raised.exception.status_code, 401)
+
+    def test_non_ascii_csrf_is_forbidden(self):
+        from fastapi import HTTPException, Request
+        from app.api.auth import require_csrf
+        request = Request({'type':'http', 'headers':[(b'x-csrf-token', b'\xff')]})
+        request.state.csrf_token = 'expected'
+        with self.assertRaises(HTTPException) as raised:
+            require_csrf(request, None)
+        self.assertEqual(raised.exception.status_code, 403)

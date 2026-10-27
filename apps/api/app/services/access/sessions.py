@@ -34,9 +34,10 @@ class SessionRepository:
         self.revoke(token)
         return None
 
-    def csrf(self, token: str) -> str:
-        return self.connection.execute('SELECT csrf_token FROM auth_sessions WHERE token_digest=%s',
-                                       (token_digest(token),)).fetchone()[0]
+    def csrf(self, token: str) -> str | None:
+        row = self.connection.execute('SELECT csrf_token FROM auth_sessions WHERE token_digest=%s',
+                                      (token_digest(token),)).fetchone()
+        return row[0] if row else None
 
     def revoke(self, token: str) -> None:
         self.connection.execute('DELETE FROM auth_sessions WHERE token_digest=%s', (token_digest(token),))

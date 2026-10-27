@@ -1,3 +1,4 @@
+from apps.api.tests.postgres_support import seed_project
 """Enrollment queue lifecycle with isolated PostgreSQL and fake inference."""
 import threading
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from apps.api.tests.test_meeting_worker import _result
 class VoiceJobsTest(PostgresTestCase):
     def setUp(self):
         super().setUp()
+        self.account, self.project = seed_project(self.connection)
         initialize_meeting_storage(self.data_dir, self.connection)
         self.voices = VoiceRepository(self.connection)
         self.profile = self.voices.create_profile('Participant')
@@ -60,7 +62,7 @@ class VoiceJobsTest(PostgresTestCase):
         self.assertEqual(self.connection.execute('SELECT count(*) FROM voice_samples').fetchone()[0], 0)
 
     def test_source_cancelled_during_processing_prevents_publish(self):
-        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None)
+        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         self.meetings.claim_next()
         self.meetings.complete('source', _result())
         job = self.voices.enqueue_from_meeting(self.profile.id, 'source', 'SPEAKER_00')
@@ -119,7 +121,7 @@ class VoiceJobsTest(PostgresTestCase):
         self.assertIsNotNone(stored)
         self.assertEqual((stored.profile_id, stored.status, stored.failure_code), (None, 'failed', 'source_changed'))
         profile = self.voices.create_profile('Another')
-        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None)
+        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         self.meetings.claim_next()
         self.meetings.complete('source', _result())
         job = self.voices.enqueue_from_meeting(profile.id, 'source', 'SPEAKER_00')
@@ -139,7 +141,7 @@ class VoiceJobsTest(PostgresTestCase):
         self.assertTrue(audio_path(self.data_dir, job.storage_key).exists())
 
     def test_cancellation_removes_existing_source_samples(self):
-        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None)
+        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         self.meetings.claim_next()
         self.meetings.complete('source', _result())
         job = self.voices.enqueue_from_meeting(self.profile.id, 'source', 'SPEAKER_00')
@@ -152,7 +154,7 @@ class VoiceJobsTest(PostgresTestCase):
 
     def test_source_inference_has_no_transaction_and_lost_ownership_does_not_publish(self):
         from app.services.meetings import worker
-        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None)
+        self.meetings.create_meeting('source', None, 'a.wav', 'a'*32, 'hash', None, project_id=self.project.id, uploaded_by_account_id=self.account.id)
         self.meetings.claim_next()
         self.meetings.complete('source', _result())
         job = self.voices.enqueue_from_meeting(self.profile.id, 'source', 'SPEAKER_00')

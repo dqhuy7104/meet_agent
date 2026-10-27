@@ -1,3 +1,4 @@
+from apps.api.tests.postgres_support import seed_project
 from concurrent.futures import ThreadPoolExecutor
 
 from app.schemas.transcript import AudioProcessResponse, TranscriptSegment
@@ -15,8 +16,9 @@ def result(text: str = "Kế hoạch quý mới") -> AudioProcessResponse:
 class MeetingConcurrencyTest(PostgresTestCase):
     def setUp(self) -> None:
         super().setUp()
+        self.account, self.project = seed_project(self.connection)
         self.repository = MeetingRepository(self.connection)
-        self.repository.create_meeting("m1", "Meeting", "a.wav", "a" * 32, "checksum", "key")
+        self.repository.create_meeting("m1", "Meeting", "a.wav", "a" * 32, "checksum", "key", project_id=self.project.id, uploaded_by_account_id=self.account.id)
 
     def test_concurrent_claim_has_one_winner(self) -> None:
         def claim():
@@ -54,7 +56,7 @@ class MeetingConcurrencyTest(PostgresTestCase):
     def test_idempotency_rolls_back_and_timestamps_remain_strings(self) -> None:
         self.connection.execute("SET TIME ZONE 'Asia/Ho_Chi_Minh'")
         with self.assertRaises(IdempotencyConflict):
-            self.repository.create_meeting("m2", None, "b.wav", "b" * 32, "other", "key")
+            self.repository.create_meeting("m2", None, "b.wav", "b" * 32, "other", "key", project_id=self.project.id, uploaded_by_account_id=self.account.id)
         self.assertIsNone(self.repository.get_meeting("m2"))
         self.assertTrue(self.repository.get_meeting("m1").created_at.endswith("+00:00"))
         self.assertEqual(self.repository.count_meetings(), 1)
