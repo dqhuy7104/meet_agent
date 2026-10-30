@@ -16,7 +16,7 @@ from app.services.audio.preprocess import InvalidAudioError
 
 
 logger = logging.getLogger(__name__)
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024
 router = APIRouter(prefix="/audio", tags=["audio"])
 
 
@@ -32,18 +32,18 @@ async def _run_pipeline(data: bytes, filename: str, models: ModelRegistry) -> Au
     responses={400: {"description": "Invalid audio"}, 413: {"description": "Upload too large"}, 503: {"description": "Model unavailable"}},
 )
 async def process_audio_upload(
-    file: Annotated[UploadFile, File(description="Audio file supported by FFmpeg (up to 25 MiB, 30 minutes)")],
+    file: Annotated[UploadFile, File(description="Audio file supported by FFmpeg (up to 100 MiB, 30 minutes)")],
     models: Annotated[ModelRegistry, Depends(get_models)],
 ) -> AudioProcessResponse:
     """Run VAD, language-routed ASR, and speaker diarization on one audio file."""
     if file.size is not None and file.size > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Audio file exceeds 25 MiB")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Audio file exceeds 100 MiB")
     try:
         audio_bytes = await file.read(MAX_UPLOAD_BYTES + 1)
     finally:
         await file.close()
     if len(audio_bytes) > MAX_UPLOAD_BYTES:
-        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Audio file exceeds 25 MiB")
+        raise HTTPException(status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, detail="Audio file exceeds 100 MiB")
     try:
         return await _run_pipeline(audio_bytes, file.filename or "audio", models)
     except InvalidAudioError as error:

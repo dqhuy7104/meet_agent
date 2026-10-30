@@ -39,7 +39,7 @@ class VoiceRoutesTest(test_meeting_search.MeetingSearchTest):
         self.assertEqual(len((await self.client.get('/api/voice-profiles')).json()), 1)
         for name in (' ', 'x' * 101):
             self.assertEqual((await self.client.patch(f'/api/voice-profiles/{profile}', json={'display_name': name})).status_code, 422)
-        for data, code in ((b'', 400), (b'x' * (25 * 1024 * 1024 + 1), 413), (b'audio', 202)):
+        for data, code in ((b'', 400), (b'x' * (100 * 1024 * 1024 + 1), 413), (b'audio', 202)):
             response = await self.client.post(f'/api/voice-profiles/{profile}/samples/upload', files={'file': ('a.wav', data)})
             self.assertEqual(response.status_code, code)
         job = response.json()

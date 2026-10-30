@@ -12,6 +12,7 @@ from psycopg.rows import dict_row
 from psycopg.pq import TransactionStatus
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from uuid import UUID, uuid4
 
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
 from app.services.rag.outbox import enqueue_rag_event
@@ -76,6 +77,14 @@ class MeetingDetail:
     diarization_segments: list[SpeakerTurn]
     transcript_segments: list[TranscriptSegment]
     audio_files: list[MeetingAudioFile]
+
+
+@dataclass(frozen=True)
+class MeetingSummaryRecord:
+    summary: str
+    provider_id: str
+    model_id: str
+    prompt_version: str
 
 
 @dataclass(frozen=True)
@@ -171,8 +180,50 @@ class MeetingRepository:
 
     def _clear_results(self, meeting_id: str) -> None:
         self.connection.execute("UPDATE meetings SET voice_identification_status='not_run' WHERE id=%s", (meeting_id,))
-        for table in ("meeting_speaker_identities", "rag_publications", "rag_index_jobs", "transcript_segments", "diarization_segments", "vad_segments"):
+        for table in ("meeting_summaries", "meeting_speaker_identities", "rag_publications", "rag_index_jobs", "transcript_segments", "diarization_segments", "vad_segments"):
             self.connection.execute(f"DELETE FROM {table} WHERE meeting_id=%s", (meeting_id,))
+
+    def get_summary(self, meeting_id: str, revision: str) -> MeetingSummaryRecord | None:
+        row = self._execute("""SELECT summary,provider_id,model_id,prompt_version FROM meeting_summaries
+            WHERE meeting_id=%s AND transcript_revision=%s AND state='ready'""", (meeting_id, revision)).fetchone()
+        return MeetingSummaryRecord(**row) if row else None
+
+    def claim_summary(self, meeting_id: str, revision: str) -> UUID | None:
+        from app.services.rag.chunking import snapshot_meeting
+        claim_id = uuid4()
+        with self.connection.transaction():
+            record = self._locked_meeting(meeting_id)
+            if record is None or record.status != 'completed':
+                return None
+            if snapshot_meeting(self.get_detail(meeting_id)).revision != revision:
+                return None
+            row = self.connection.execute("""INSERT INTO meeting_summaries(meeting_id,transcript_revision,state,claim_id)
+                VALUES (%s,%s,'generating',%s)
+                ON CONFLICT(meeting_id) DO UPDATE SET claim_id=excluded.claim_id,claimed_at=now(),
+                    transcript_revision=excluded.transcript_revision
+                WHERE meeting_summaries.state='generating'
+                    AND meeting_summaries.claimed_at < now()-interval '4 minutes'
+                RETURNING claim_id""", (meeting_id, revision, claim_id)).fetchone()
+        return row[0] if row else None
+
+    def save_summary(self, meeting_id: str, revision: str, claim_id: UUID,
+                     summary: str, provider_id: str, model_id: str, prompt_version: str) -> bool:
+        from app.services.rag.chunking import snapshot_meeting
+        with self.connection.transaction():
+            record = self._locked_meeting(meeting_id)
+            if record is None or record.status != 'completed':
+                return False
+            detail = self.get_detail(meeting_id)
+            if snapshot_meeting(detail).revision != revision:
+                return False
+            return self.connection.execute("""UPDATE meeting_summaries SET state='ready',summary=%s,
+                provider_id=%s,model_id=%s,prompt_version=%s,created_at=now()
+                WHERE meeting_id=%s AND transcript_revision=%s AND claim_id=%s AND state='generating'""",
+                (summary, provider_id, model_id, prompt_version, meeting_id, revision, claim_id)).rowcount == 1
+
+    def release_summary(self, meeting_id: str, revision: str, claim_id: UUID) -> None:
+        self.connection.execute("""DELETE FROM meeting_summaries WHERE meeting_id=%s
+            AND transcript_revision=%s AND claim_id=%s AND state='generating'""", (meeting_id, revision, claim_id))
 
     def complete(self, meeting_id: str, result: AudioProcessResponse, durations: list[float] | None = None,
                  *, identities: Mapping[str, VoiceMatch | None] | None = None,

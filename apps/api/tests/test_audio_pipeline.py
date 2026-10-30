@@ -97,7 +97,7 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.pipelines.meeting_pipeline.get_speech_timestamps",
             return_value=[{"start": 0, "end": SAMPLE_RATE}],
-        ), patch.object(self.models, "get_asr", return_value=lambda audio: {"text": "Xin chào"}) as asr:
+        ), patch.object(self.models, "get_asr", return_value=lambda audio, **kwargs: {"text": "Xin chào"}) as asr:
             response = await self.client.post(
                 "/api/audio/process",
                 files={"file": ("sample.wav", _wav_bytes(), "audio/wav")},
@@ -126,8 +126,26 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["transcript"], "Hello")
         whisper.assert_called_once()
-        self.assertEqual(whisper_asr.call_args.kwargs, {"generate_kwargs": {"task": "transcribe"}})
+        self.assertEqual(whisper_asr.call_args.kwargs, {"return_timestamps": True, "generate_kwargs": {"task": "transcribe"}})
         phowhisper.assert_not_called()
+
+    async def test_long_speech_enables_timestamps_for_both_models(self) -> None:
+        for language, getter in [("vi", "get_asr"), ("other", "get_whisper")]:
+            with self.subTest(language=language):
+                recognizer = Mock(return_value={"text": "Speech", "chunks": []})
+                with patch(
+                    "app.pipelines.meeting_pipeline.get_speech_timestamps",
+                    return_value=[{"start": 0, "end": 31 * SAMPLE_RATE}],
+                ), patch.object(self.models, "get_language", return_value=lambda audio: language), patch.object(
+                    self.models, getter, return_value=recognizer
+                ):
+                    response = await self.client.post(
+                        "/api/audio/process", files={"file": ("long.wav", _wav_bytes(31), "audio/wav")}
+                    )
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["transcript"], "Speech")
+                self.assertEqual(response.json()["transcript_segments"][0]["end"], 31.0)
+                self.assertTrue(recognizer.call_args.kwargs["return_timestamps"])
 
     async def test_mixed_language_regions_use_both_asr_models(self) -> None:
         languages = iter(["vi", "other"])
@@ -138,7 +156,7 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
                 {"start": SAMPLE_RATE, "end": 2 * SAMPLE_RATE},
             ],
         ), patch.object(self.models, "get_language", return_value=lambda audio: next(languages)), patch.object(
-            self.models, "get_asr", return_value=lambda audio: {"text": "Xin chào"}
+            self.models, "get_asr", return_value=lambda audio, **kwargs: {"text": "Xin chào"}
         ) as phowhisper, patch.object(
             self.models, "get_whisper", return_value=lambda audio, **kwargs: {"text": "Hello"}
         ) as whisper:
@@ -184,7 +202,7 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.pipelines.meeting_pipeline.get_speech_timestamps",
             return_value=[{"start": 0, "end": SAMPLE_RATE}],
-        ), patch.object(self.models, "get_asr", return_value=lambda audio: {"text": "Xin chào"}):
+        ), patch.object(self.models, "get_asr", return_value=lambda audio, **kwargs: {"text": "Xin chào"}):
             response = await self.client.post(
                 "/api/audio/process",
                 files={"file": ("sample.wav", _wav_bytes(), "audio/wav")},
@@ -206,7 +224,7 @@ class AudioApiTest(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.pipelines.meeting_pipeline.get_speech_timestamps",
             return_value=[{"start": 0, "end": SAMPLE_RATE}],
-        ), patch.object(self.models, "get_asr", return_value=lambda audio: {"text": "Xin chào"}):
+        ), patch.object(self.models, "get_asr", return_value=lambda audio, **kwargs: {"text": "Xin chào"}):
             response = await self.client.post(
                 "/api/audio/process",
                 files={"file": ("sample.wav", _wav_bytes(), "audio/wav")},
@@ -244,7 +262,7 @@ class EmbeddingSinkTest(unittest.TestCase):
         models = FakeRegistry()
         models.annotation = SimpleNamespace(speaker_diarization=models.annotation, speaker_embeddings=np.array([[3., 4.]]))
         sink = {}
-        with patch('app.pipelines.meeting_pipeline.get_speech_timestamps', return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(models, 'get_asr', return_value=lambda audio: {'text': 'Hi'}):
+        with patch('app.pipelines.meeting_pipeline.get_speech_timestamps', return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(models, 'get_asr', return_value=lambda audio, **kwargs: {'text': 'Hi'}):
             response = process_audio(_wav_bytes(), 'a.wav', models, speaker_embeddings=sink)
         self.assertEqual(set(response.model_dump()), {'filename', 'duration_seconds', 'transcript', 'vad_segments', 'diarization_segments', 'transcript_segments'})
         self.assertEqual(sink, {'SPEAKER_00': [.6, .8]})
@@ -255,7 +273,7 @@ class EmbeddingSinkTest(unittest.TestCase):
         models = FakeRegistry()
         models.annotation = SimpleNamespace(speaker_diarization=models.annotation, speaker_embeddings=np.array([[float('nan'), 0.]]))
         sink = {}
-        with patch('app.pipelines.meeting_pipeline.get_speech_timestamps', return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(models, 'get_asr', return_value=lambda audio: {'text': 'Hi'}):
+        with patch('app.pipelines.meeting_pipeline.get_speech_timestamps', return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(models, 'get_asr', return_value=lambda audio, **kwargs: {'text': 'Hi'}):
             process_audio(_wav_bytes(), 'a.wav', models, speaker_embeddings=sink)
         self.assertEqual(sink, {})
 

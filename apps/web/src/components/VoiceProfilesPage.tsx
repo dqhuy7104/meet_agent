@@ -58,7 +58,6 @@ function ProfileEditor({ profile, onChanged, canDelete }: {profile: VoiceProfile
       }}>Xóa hồ sơ và mẫu</button>}
     </form>
     <h4>Mẫu giọng nói · {samples?.length ?? profile.sample_count}/5</h4>
-    <p>Mẫu được xếp từ cũ nhất đến mới nhất. Xóa mẫu không thay đổi tên đã gán trong cuộc họp trước.</p>
     {warning && <p className="message">{warning}</p>}
     {samples === null ? <p>Đang tải mẫu…</p> : samples.length === 0 ? <p>Chưa có mẫu giọng nói.</p> : <ol className="voice-samples">{samples.map(sample => <li key={sample.id}>
       <div><b>#{sample.id} · {sample.source === 'upload' ? 'Audio tải lên' : `Cuộc họp · ${sample.source_speaker}`}</b>
@@ -66,9 +65,7 @@ function ProfileEditor({ profile, onChanged, canDelete }: {profile: VoiceProfile
       <small>Phiên bản: {sample.fingerprint}</small></div>
       {canDelete && <button type="button" disabled={isBusy || isEnrolling} aria-label={`Xóa mẫu ${sample.id}`} onClick={() => void run(async () => { await voiceApi.removeSample(profile.id, sample.id); await refreshSamples(); onChanged(); })}>Xóa mẫu</button>}
     </li>)}</ol>}
-    <h4>Thêm mẫu từ audio</h4>
-    <p>Một người nói, ít nhất 10 giây lời nói riêng, audio tối đa 2 phút và 25 MiB. Audio mẫu được xóa sau xử lý.</p>
-    <form onSubmit={event => { event.preventDefault(); if (!file) return; if (!file.size || file.size > 25 * 1024 * 1024) { setError('Chọn file audio không rỗng, tối đa 25 MiB.'); return; } void start(() => voiceApi.upload(profile.id, file)); }}>
+    <form onSubmit={event => { event.preventDefault(); if (!file) return; if (!file.size || file.size > 100 * 1024 * 1024) { setError('Chọn file audio không rỗng, tối đa 25 MiB.'); return; } void start(() => voiceApi.upload(profile.id, file)); }}>
       <label>File audio một người nói<input type="file" accept="audio/*" required onChange={event => setFile(event.target.files?.[0])} /></label>
       <button disabled={isBusy || isEnrolling || !file}>Thêm mẫu từ audio</button>
     </form>

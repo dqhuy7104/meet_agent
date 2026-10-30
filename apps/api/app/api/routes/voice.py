@@ -121,7 +121,7 @@ async def upload_sample(
         require_profile(repository, profile_id)
         data = await file.read(MAX_UPLOAD_BYTES + 1)
         if len(data) > MAX_UPLOAD_BYTES:
-            raise HTTPException(413, 'Audio upload exceeds 25 MiB')
+            raise HTTPException(413, 'Audio upload exceeds 100 MiB')
         if not data:
             raise HTTPException(400, 'Audio upload must not be empty')
         try:

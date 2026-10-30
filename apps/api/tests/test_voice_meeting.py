@@ -111,7 +111,7 @@ class VoiceMeetingTest(PostgresTestCase):
                 'app.services.meetings.worker.pipeline_fingerprint', return_value='v1'), patch(
                 'app.pipelines.meeting_pipeline.get_speech_timestamps',
                 return_value=[{'start': 0, 'end': SAMPLE_RATE}]), patch.object(
-                models, 'get_asr', return_value=lambda audio: {'text': 'Xin chào'}):
+                models, 'get_asr', return_value=lambda audio, **kwargs: {'text': 'Xin chào'}):
             run_once_inline(self.repository, self.data_dir, self.settings, self.database)
         meeting = self.repository.get_meeting(meeting_id)
         self.assertEqual((meeting.status, meeting.voice_identification_status, meeting.transcript),

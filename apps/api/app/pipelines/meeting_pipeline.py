@@ -67,9 +67,9 @@ def process_audio(
         language = language_detector(torch.from_numpy(clip))
         asr_input = {"array": clip, "sampling_rate": SAMPLE_RATE}
         if language == "vi":
-            prediction = models.get_asr()(asr_input)
+            prediction = models.get_asr()(asr_input, return_timestamps=True)
         else:
-            prediction = models.get_whisper()(asr_input, generate_kwargs={"task": "transcribe"})
+            prediction = models.get_whisper()(asr_input, return_timestamps=True, generate_kwargs={"task": "transcribe"})
         text = str(prediction["text"]).strip()
         if not text:
             continue

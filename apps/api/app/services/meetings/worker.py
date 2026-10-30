@@ -8,6 +8,7 @@ import multiprocessing
 import os
 import signal
 import time
+import traceback
 from contextlib import contextmanager
 from multiprocessing.synchronize import Event
 from pathlib import Path
@@ -112,9 +113,16 @@ def run_claimed_meeting(meeting_id: str, data_dir: Path, settings: Settings, dat
         except ModelLoadError:
             repository.fail(meeting.id, "model_unavailable")
             logger.warning("Meeting %s failed: model_unavailable", meeting.id)
-        except Exception:
+        except Exception as error:
             repository.fail(meeting.id, "processing_error")
-            logger.warning("Meeting %s failed: processing_error", meeting.id)
+            frames = traceback.extract_tb(error.__traceback__)[-5:]
+            locations = " -> ".join(
+                f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}" for frame in frames
+            )
+            logger.warning(
+                "Meeting %s failed: processing_error (%s at %s)",
+                meeting.id, type(error).__name__, locations,
+            )
     finally:
         connection.close()
 

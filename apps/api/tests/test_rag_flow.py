@@ -102,6 +102,10 @@ class ScopedQueryTest(unittest.IsolatedAsyncioTestCase):
             def can_read(inner, meeting_id): return meeting_id in owner.allowed
         class Meetings:
             def get_detail(inner, meeting_id): return owner.details.get(meeting_id)
+            def get_summary(inner, meeting_id, revision): return None
+            def claim_summary(inner, meeting_id, revision): return 'claim'
+            def save_summary(inner, meeting_id, revision, claim, summary, provider_id, model_id, prompt_version): return True
+            def release_summary(inner, meeting_id, revision, claim): pass
         class Database:
             async def call(inner, method, *args):
                 if method == 'manifest':

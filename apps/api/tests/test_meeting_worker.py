@@ -183,13 +183,17 @@ class MeetingWorkerTest(PostgresTestCase):
             with self.subTest(code=code):
                 self.connection.execute("UPDATE meetings SET status='queued', attempt_count=0, failure_code=NULL")
                 self.connection.commit()
-                with patch("app.services.meetings.worker.process_audio", side_effect=error):
-                    self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
+                with self.assertLogs("app.services.meetings.worker", level="WARNING") as logs:
+                    with patch("app.services.meetings.worker.process_audio", side_effect=error):
+                        self.assertTrue(run_once(self.repository, self.data_dir, self.settings, self.database))
                 record = self.repository.get_meeting("m1")
                 self.assertEqual(record.status, "failed")
                 self.assertEqual(record.failure_code, code)
                 self.assertNotIn("secret", record.failure_code)
                 self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 0)
+                if code == "processing_error":
+                    self.assertIn("RuntimeError", "\n".join(logs.output))
+                    self.assertNotIn("private path and token", "\n".join(logs.output))
 
     def test_retry_resets_attempts_and_replaces_old_results(self) -> None:
         self.repository.claim_next()

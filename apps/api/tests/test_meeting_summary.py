@@ -88,13 +88,27 @@ class SummaryTest(unittest.IsolatedAsyncioTestCase):
         registry = ProviderRegistry(settings)
         class Meetings:
             detail = None
+            saved = None
+            claim = 'claim-1'
             def get_detail(self, meeting_id):
                 return self.detail
+            def get_summary(self, meeting_id, revision):
+                return self.saved
+            def claim_summary(self, meeting_id, revision):
+                return self.claim
+            def save_summary(self, meeting_id, revision, claim, summary, provider_id, model_id, prompt_version):
+                self.saved = SimpleNamespace(summary=summary, provider_id=provider_id, model_id=model_id, prompt_version=prompt_version)
+                return True
+            def release_summary(self, meeting_id, revision, claim):
+                self.claim = None
         class Client:
+            calls = 0
             async def generate(self, selection, messages):
+                self.calls += 1
                 return '{"summary":"Đã tóm tắt"}'
         meetings = Meetings()
-        service = QueryService(settings, registry, meetings, None, Client())
+        client = Client()
+        service = QueryService(settings, registry, meetings, None, client)
         with self.assertRaisesRegex(RagError, 'meeting_not_found'):
             await service.summarize('missing')
         meetings.detail = SimpleNamespace(meeting=SimpleNamespace(id='one', status='processing', title='Họp', original_filename='one.wav'), transcript_segments=[])
@@ -105,3 +119,79 @@ class SummaryTest(unittest.IsolatedAsyncioTestCase):
         result = await service.summarize('one')
         self.assertEqual(result['summary'], 'Đã tóm tắt')
         self.assertEqual(result['provider_id'], 'local')
+        self.assertEqual(await service.summarize('one'), result)
+        self.assertEqual(client.calls, 1)
+
+    async def test_saved_summary_is_returned_without_model_or_provider(self):
+        settings = load_rag_settings(environment())
+        registry = ProviderRegistry(settings)
+        detail = SimpleNamespace(meeting=SimpleNamespace(id='one', status='completed', title='Họp', original_filename='one.wav'),
+                                 transcript_segments=[SimpleNamespace(start=0, end=1, speaker='SPEAKER_00', text='Nội dung')])
+        class Meetings:
+            def get_detail(self, meeting_id):
+                return detail
+            def get_summary(self, meeting_id, revision):
+                return SimpleNamespace(summary='Bản đã lưu', provider_id='local', model_id='chat', prompt_version='v1')
+        class Client:
+            async def generate(self, selection, messages):
+                raise AssertionError('Saved summary must avoid model invocation')
+        service = QueryService(settings, registry, Meetings(), None, Client())
+        self.assertEqual((await service.summarize('one'))['summary'], 'Bản đã lưu')
+
+    async def test_saved_summary_is_not_returned_after_meeting_changes(self):
+        settings = load_rag_settings(environment())
+        registry = ProviderRegistry(settings)
+        detail = SimpleNamespace(meeting=SimpleNamespace(id='one', status='completed', title='Họp', original_filename='one.wav'),
+                                 transcript_segments=[SimpleNamespace(start=0, end=1, speaker='SPEAKER_00', text='Nội dung')])
+        class Meetings:
+            reads = 0
+            def get_detail(self, meeting_id):
+                self.reads += 1
+                if self.reads == 2:
+                    detail.meeting.status = 'processing'
+                return detail
+            def get_summary(self, meeting_id, revision):
+                return SimpleNamespace(summary='Bản cũ', provider_id='local', model_id='chat', prompt_version='v1')
+        with self.assertRaisesRegex(RagError, 'meeting_changed'):
+            await QueryService(settings, registry, Meetings(), None, None).summarize('one')
+
+    async def test_competing_summary_claim_does_not_call_model(self):
+        settings = load_rag_settings(environment())
+        registry = ProviderRegistry(settings)
+        detail = SimpleNamespace(meeting=SimpleNamespace(id='one', status='completed', title='Họp', original_filename='one.wav'),
+                                 transcript_segments=[SimpleNamespace(start=0, end=1, speaker='SPEAKER_00', text='Nội dung')])
+        class Meetings:
+            def get_detail(self, meeting_id):
+                return detail
+            def get_summary(self, meeting_id, revision):
+                return None
+            def claim_summary(self, meeting_id, revision):
+                return None
+        class Client:
+            async def generate(self, selection, messages):
+                raise AssertionError('Competing request must not invoke model')
+        with self.assertRaisesRegex(RagError, 'summary_generating'):
+            await QueryService(settings, registry, Meetings(), None, Client()).summarize('one')
+
+    async def test_failed_generation_releases_claim(self):
+        settings = load_rag_settings(environment())
+        registry = ProviderRegistry(settings)
+        detail = SimpleNamespace(meeting=SimpleNamespace(id='one', status='completed', title='Họp', original_filename='one.wav'),
+                                 transcript_segments=[SimpleNamespace(start=0, end=1, speaker='SPEAKER_00', text='Nội dung')])
+        class Meetings:
+            released = False
+            def get_detail(self, meeting_id):
+                return detail
+            def get_summary(self, meeting_id, revision):
+                return None
+            def claim_summary(self, meeting_id, revision):
+                return 'claim-1'
+            def release_summary(self, meeting_id, revision, claim):
+                self.released = True
+        class Client:
+            async def generate(self, selection, messages):
+                raise RagError('provider_unavailable')
+        meetings = Meetings()
+        with self.assertRaisesRegex(RagError, 'provider_unavailable'):
+            await QueryService(settings, registry, meetings, None, Client()).summarize('one')
+        self.assertTrue(meetings.released)

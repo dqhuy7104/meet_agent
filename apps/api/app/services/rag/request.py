@@ -48,6 +48,7 @@ class RagRequestService:
         from app.services.rag.providers import ModelClient
         from app.services.rag.query import QueryService
         from app.services.rag.repository import RagRepository
+        from app.services.llm.prompt_settings import PromptRepository
 
         async def run():
             deadline.remaining()
@@ -88,6 +89,17 @@ class RagRequestService:
                             detail = meetings.get_detail(meeting_id)
                             deadline.remaining()
                             return detail
+                        def get_summary(inner, meeting_id, revision):
+                            before_query()
+                            return meetings.get_summary(meeting_id, revision)
+                        def claim_summary(inner, meeting_id, revision):
+                            before_query()
+                            return meetings.claim_summary(meeting_id, revision)
+                        def save_summary(inner, meeting_id, revision, claim, summary, provider_id, model_id, prompt_version):
+                            before_query()
+                            return meetings.save_summary(meeting_id, revision, claim, summary, provider_id, model_id, prompt_version)
+                        def release_summary(inner, meeting_id, revision, claim):
+                            meetings.release_summary(meeting_id, revision, claim)
                         def completed_meeting_ids(inner):
                             before_query()
                             return meetings.completed_meeting_ids()
@@ -99,7 +111,8 @@ class RagRequestService:
                             return result
                     async with httpx.AsyncClient() as http:
                         client = ModelClient(self.registry, http, deadline.remaining)
-                        service = QueryService(self.settings, self.registry, Source(), Database(), client, Scope())
+                        prompts = PromptRepository(connection).get() if action in {'query', 'summarize', 'evaluation_state'} else None
+                        service = QueryService(self.settings, self.registry, Source(), Database(), client, Scope(), prompts)
                         return await getattr(service, action)(*arguments[:-1])
             except (psycopg.Error, DatabaseUnavailableError):
                 deadline.remaining()

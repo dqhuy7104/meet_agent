@@ -1,9 +1,10 @@
 import { projectApi, type Project } from "./lib/projectApi";
 import { AuthProvider, useAuth } from "./lib/AuthProvider";
-import { LoginPage } from "./components/LoginPage";
+import { LoginRedirect } from "./components/AuthPages";
 import { ProjectsPage } from "./components/ProjectsPage";
 import { ProjectPage } from "./components/ProjectPage";
 import { AccountsPage } from "./components/AccountsPage";
+import { SettingsPage } from "./components/SettingsPage";
 import {
   createElement,
   useCallback,
@@ -15,6 +16,7 @@ import {
 } from "react";
 import {
   NavLink,
+  Navigate,
   Route,
   Routes,
   useNavigate,
@@ -45,6 +47,7 @@ import { MeetBotPanel } from "./components/MeetBotPanel";
 import { MeetingSearchChat } from "./components/MeetingSearchChat";
 import { findAudioPartAtTime } from "./lib/timeline";
 import { speakerLabels } from "./lib/speakers";
+import { shouldRetrySummary } from "./lib/summaryState";
 import type { ApiMeeting, MeetingStatus } from "./types/meeting";
 
 const labels: Record<MeetingStatus, string> = {
@@ -75,7 +78,6 @@ function Status({ status }: { status: MeetingStatus }) {
   );
 }
 function Shell({ children }: { children: ReactNode }) {
-  const { account, logout } = useAuth();
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [dark, setDark] = useState(false);
   const navigation = [
@@ -105,8 +107,6 @@ function Shell({ children }: { children: ReactNode }) {
           </button>
         </div>
         <nav>
-          {account?.is_system_admin && <NavLink to="/accounts">Accounts</NavLink>}
-          <button onClick={() => void logout().catch(() => undefined)}>Đăng xuất</button>
           {navigation.map(([to, name, Icon]) => (
             <NavLink key={to} to={to} end={to === "/projects"} aria-label={name} title={name}>
               {createElement(Icon as ComponentType<{ size?: number }>, {
@@ -348,9 +348,9 @@ function UploadModal({
   const select = (selected: FileList | null) => {
     const next = Array.from(selected ?? []);
     if (!next.length) return;
-    if (next.length > 10 || next.some((file) => !file.type.startsWith("audio/") || !file.size || file.size > 25 * 1024 * 1024) || next.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
+    if (next.length > 10 || next.some((file) => !file.type.startsWith("audio/") || !file.size || file.size > 100 * 1024 * 1024) || next.reduce((sum, file) => sum + file.size, 0) > 100 * 1024 * 1024) {
       setFiles([]);
-      setMessage("Chọn tối đa 10 file audio, mỗi file tối đa 25 MiB và tổng tối đa 100 MiB.");
+      setMessage("Chọn tối đa 10 file audio, mỗi file tối đa 100 MiB và tổng tối đa 100 MiB.");
       return;
     }
     setFiles(next);
@@ -389,7 +389,7 @@ function UploadModal({
         <mark>LOCAL UPLOAD</mark>
         <h2 id="upload-title">Tải bản ghi lên</h2>
         <p>
-          Chọn tối đa 10 phần ghi âm theo thứ tự phát. Mỗi file tối đa 25 MiB, tổng tối đa 100 MiB.
+          Chọn tối đa 10 phần ghi âm theo thứ tự phát. Mỗi file tối đa 100 MiB, tổng tối đa 100 MiB.
         </p>
         <label
           className="drop"
@@ -594,24 +594,39 @@ function LocalWorkspace({ id }: { id: string }) {
     if (!meeting.transcript_segments.some((segment) => segment.text.trim())) {
       setSummary("");
       setSummaryError("");
+      setIsSummaryLoading(false);
       return;
     }
     const controller = new AbortController();
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
     setSummary("");
     setSummaryError("");
     setIsSummaryLoading(true);
-    void meetingApi.summary(meeting.id, controller.signal).then((result) => {
-      if (!controller.signal.aborted) setSummary(result.summary);
-    }).catch((cause) => {
-      if (controller.signal.aborted) return;
-      const code = cause instanceof ApiError ? cause.message : "";
-      setSummaryError(code === "rag_disabled" || code === "chat_provider_not_configured"
-        ? "Chưa cấu hình chat model cho RAG."
-        : "Không tạo được tóm tắt. Vui lòng thử lại.");
-    }).finally(() => {
-      if (!controller.signal.aborted) setIsSummaryLoading(false);
-    });
-    return () => controller.abort();
+    const loadSummary = async (attempt: number): Promise<void> => {
+      try {
+        const result = await meetingApi.summary(meeting.id, controller.signal);
+        if (!controller.signal.aborted) {
+          setSummary(result.summary);
+          setIsSummaryLoading(false);
+        }
+      } catch (cause) {
+        if (controller.signal.aborted) return;
+        if (shouldRetrySummary(cause, attempt)) {
+          retryTimer = setTimeout(() => void loadSummary(attempt + 1), 2000);
+          return;
+        }
+        const code = cause instanceof ApiError ? cause.message : "";
+        setSummaryError(code === "rag_disabled" || code === "chat_provider_not_configured"
+          ? "Chưa cấu hình chat model cho RAG."
+          : "Không tạo được tóm tắt. Vui lòng thử lại.");
+        setIsSummaryLoading(false);
+      }
+    };
+    void loadSummary(0);
+    return () => {
+      controller.abort();
+      clearTimeout(retryTimer);
+    };
   }, [id, meeting?.id, meeting?.status, summaryAttempt]);
   const seek = useCallback((seconds: number, shouldPlay = true) => {
     const parts = meeting?.audio_files ?? [];
@@ -797,10 +812,6 @@ function LocalWorkspace({ id }: { id: string }) {
                 status={meeting.voice_identification_status ?? "not_run"}
                 onCorrected={identity => setMeeting(current => current?.id === id ? {...current, speaker_identities: [...(current.speaker_identities ?? []).filter(item => item.speaker !== identity.speaker), identity]} : current)}
               />
-              <h4>Diarization</h4>
-              <p>
-                {speakers.length} người nói{speakers.length ? `: ${speakers.join(", ")}` : " được phát hiện"}.
-              </p>
             </div>
             <div className="insight-body">
               <h3>Nội dung cuộc họp</h3>
@@ -813,28 +824,18 @@ function LocalWorkspace({ id }: { id: string }) {
     </div>
   );
 }
-function SettingsPage() {
-  return (
-    <div className="page">
-      <section className="title">
-        <div>
-          <h2>Cài đặt workspace</h2>
-        </div>
-      </section>
-    </div>
-  );
-}
 function AuthenticatedApp() {
   const { account, loading } = useAuth();
   if (loading) return <main className="page" role="status">Đang tải phiên đăng nhập…</main>;
-  if (!account) return <LoginPage />;
+  if (!account) return <LoginRedirect />;
   return (
     <Shell>
       <Routes>
         <Route path="/" element={<ProjectsPage />} />
         <Route path="/projects" element={<ProjectsPage />} />
         <Route path="/projects/:id" element={<ProjectPage />} />
-        <Route path="/accounts" element={<AccountsPage />} />
+        <Route path="/accounts" element={<Navigate to="/settings/accounts" replace />} />
+        <Route path="/settings/accounts" element={<AccountsPage />} />
         <Route path="/meetings" element={<ProjectsPage />} />
         <Route path="/chat" element={<MeetingSearchChat />} />
         <Route path="/workspace/:id" element={<Workspace />} />

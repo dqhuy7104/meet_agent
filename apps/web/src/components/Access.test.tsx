@@ -11,14 +11,14 @@ function mount(admin = false) {
   vi.stubGlobal('fetch', vi.fn(async (url: string) => ({ok:true,status:200,json:async()=>url.includes('/session') ? {account:{...account,is_system_admin:admin},csrf_token:'csrf'} : []})));
   render(<MemoryRouter><AuthProvider><ProjectsPage /></AuthProvider></MemoryRouter>);
 }
-it('offers login and registration to guests', () => { render(<AuthProvider><LoginPage /></AuthProvider>); expect(screen.getByRole('button',{name:'Đăng nhập'})).toBeTruthy(); expect(screen.getByRole('button',{name:'Đăng ký'})).toBeTruthy(); });
+it('offers login and registration to guests', () => { render(<MemoryRouter><AuthProvider><LoginPage /></AuthProvider></MemoryRouter>); expect(screen.getByRole('button',{name:'Đăng nhập'})).toBeTruthy(); expect(screen.getByRole('link',{name:'Đăng ký'})).toBeTruthy(); });
 it('shows unassigned users an empty project state', async () => { mount(); expect(await screen.findByText('Bạn chưa được thêm vào dự án nào.')).toBeTruthy(); expect(screen.queryByRole('button',{name:'Tạo dự án'})).toBeNull(); });
 it('lets administrators create projects', async () => { mount(true); expect(await screen.findByRole('button',{name:'Tạo dự án'})).toBeTruthy(); });
 it('expires an authenticated session back to login',async()=>{
  vi.stubGlobal('fetch',vi.fn(async()=>({ok:true,status:200,json:async()=>({account,csrf_token:'csrf'})})));
  const {useAuth}=await import('../lib/AuthProvider');
  function Gate(){const {account:current}=useAuth();return current?<p>Signed in</p>:<LoginPage/>;}
- render(<AuthProvider><Gate/></AuthProvider>);await screen.findByText('Signed in');
+ render(<MemoryRouter><AuthProvider><Gate/></AuthProvider></MemoryRouter>);await screen.findByText('Signed in');
  const {act}=await import('@testing-library/react');act(()=>window.dispatchEvent(new Event('session-expired')));
  expect(screen.getByRole('button',{name:'Đăng nhập'})).toBeTruthy();
 });
@@ -29,6 +29,6 @@ it.each(['project_manager','member','viewer'] as const)('shows controls for %s f
  await screen.findByText('Research');
  expect(!!screen.queryByRole('button',{name:'Thêm thành viên'})).toBe(role==='project_manager');
  expect(!!screen.queryByRole('button',{name:'Tải audio'})).toBe(role!=='viewer');
- expect(screen.queryByRole('option',{name:'Manager'})).toBeNull();
- expect(screen.queryByText('System Admin')).toBeNull();
+ expect(screen.queryByRole('option',{name:'Project Manager'})).toBeNull();
+ expect(screen.queryByText('Admin')).toBeNull();
 });

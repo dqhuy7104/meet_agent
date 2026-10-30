@@ -24,7 +24,15 @@ authoritative meeting checks before sending context and returning citations. RAG
 derived storage in the shared database; cancellation purges existing index rows and queues reconciliation.
 Citations validate source membership, not semantic entailment.
 
-Glossary cleanup, automatic summaries, word-level alignment, cloud object
+Admin-editable summary and RAG system prompts are stored in PostgreSQL
+(`workspace_system_prompts`, migration 007). New LLM calls load a prompt snapshot;
+fixed JSON and evidence/citation rules remain in effect. Transcript and retrieved
+text remain user data. Blank settings use versioned built-in prompts. Custom
+summary versions and RAG evaluation hashes identify the effective prompts;
+already saved summaries are reused without regeneration when prompts change.
+
+Meeting summaries are generated on demand and persisted. Glossary cleanup,
+word-level alignment, cloud object
 storage, autonomous agents, MCP, voice chat, and Slack integration remain
 proposals. They are not part of the current RAG flow. See README for local
 setup, privacy, backfill, backup and rollback; quality evaluation requires an

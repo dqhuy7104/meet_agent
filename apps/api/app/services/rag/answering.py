@@ -25,10 +25,10 @@ def insufficient(prompt_version: str) -> RagAnswer:
 
 
 async def generate_answer(question: str, sources: list[SourceChunk], selection: ChatSelection,
-                          client: ModelClient, prompt_version: str) -> RagAnswer:
+                          client: ModelClient, prompt_version: str, system_prompt: str = '') -> RagAnswer:
     if not sources:
         return insufficient(prompt_version)
-    raw = await client.generate(selection, build_messages(question, sources, prompt_version))
+    raw = await client.generate(selection, build_messages(question, sources, prompt_version, system_prompt))
     try:
         generation = Generation.model_validate_json(raw)
     except (ValueError, ValidationError):

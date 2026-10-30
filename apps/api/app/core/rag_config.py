@@ -25,7 +25,7 @@ class StrictModel(BaseModel):
 class ChatModel(StrictModel):
     id: str = Field(min_length=1)
     context_tokens: int = Field(default=8192, ge=1024, le=1000000)
-    output_tokens: int = Field(default=1024, ge=64, le=32768)
+    output_tokens: int = Field(default=1024, ge=64, le=100000)
 
     @model_validator(mode='after')
     def validate_budget(self):

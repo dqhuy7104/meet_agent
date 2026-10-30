@@ -91,7 +91,7 @@ async def upload_meeting(
     project_id: Annotated[str, Form(min_length=1)],
     database: Annotated[DatabaseSettings, Depends(get_meeting_database_settings)],
     settings: Annotated[Settings, Depends(get_meeting_settings)],
-    file: Annotated[UploadFile | None, File(description="One original audio file, up to 25 MiB")] = None,
+    file: Annotated[UploadFile | None, File(description="One original audio file, up to 100 MiB")] = None,
     files: Annotated[list[UploadFile] | None, File(description="Ordered meeting audio files")] = None,
     title: Annotated[str | None, Form(max_length=200)] = None,
     idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key", max_length=200)] = None,
@@ -110,12 +110,12 @@ async def upload_meeting(
     try:
         for upload in uploads:
             if upload.size is not None and upload.size > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="Audio file exceeds 25 MiB")
+                raise HTTPException(status_code=413, detail="Audio file exceeds 100 MiB")
             data = await upload.read(MAX_UPLOAD_BYTES + 1)
             if not data:
                 raise HTTPException(status_code=400, detail="Audio file is empty")
             if len(data) > MAX_UPLOAD_BYTES:
-                raise HTTPException(status_code=413, detail="Audio file exceeds 25 MiB")
+                raise HTTPException(status_code=413, detail="Audio file exceeds 100 MiB")
             total_bytes += len(data)
             if total_bytes > MAX_MEETING_UPLOAD_BYTES:
                 raise HTTPException(status_code=413, detail="Meeting audio exceeds 100 MiB")

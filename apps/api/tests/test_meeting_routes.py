@@ -229,11 +229,11 @@ class MeetingUploadTest(PostgresAsyncTestCase):
         self.assertEqual(response.status_code, 400)
 
     async def test_too_large_upload_is_413(self) -> None:
-        response = await self._upload(b"x" * (25 * 1024 * 1024 + 1))
+        response = await self._upload(b"x" * (100 * 1024 * 1024 + 1))
         self.assertEqual(response.status_code, 413)
 
     async def test_exact_size_limit_is_accepted(self) -> None:
-        response = await self._upload(b"x" * (25 * 1024 * 1024))
+        response = await self._upload(b"x" * (100 * 1024 * 1024))
         self.assertEqual(response.status_code, 202)
 
     async def test_same_key_and_audio_returns_original_metadata(self) -> None:

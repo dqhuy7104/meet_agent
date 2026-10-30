@@ -35,3 +35,5 @@ from app.api.routes.projects import router as projects_router
 from app.api.routes.admin import router as admin_router
 app.include_router(projects_router, prefix='/api')
 app.include_router(admin_router, prefix='/api')
+from app.api.routes.prompt_settings import router as prompt_settings_router
+app.include_router(prompt_settings_router, prefix='/api')

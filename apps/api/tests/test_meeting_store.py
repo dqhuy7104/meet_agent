@@ -8,6 +8,8 @@ import psycopg
 import stat
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
 from pathlib import Path
 
 from app.core.config import ConfigurationError, Settings
@@ -16,6 +18,7 @@ from app.services.meetings.storage import initialize_meeting_storage
 from app.services.meetings.repository import IdempotencyConflict, MeetingRepository
 from app.services.meetings.storage import audio_path, cleanup_orphaned_audio, publish_audio
 from app.schemas.transcript import AudioProcessResponse, SpeakerTurn, SpeechSegment, TranscriptSegment
+from app.services.rag.chunking import snapshot_meeting
 
 
 class MeetingStoreTest(PostgresTestCase):
@@ -32,6 +35,63 @@ class MeetingStoreTest(PostgresTestCase):
         self.assertEqual(stat.S_IMODE((self.data_dir / "audio").stat().st_mode), 0o700)
         self.assertEqual(stat.S_IMODE((self.data_dir / "tmp").stat().st_mode), 0o700)
         self.assertEqual(self.connection.execute("SELECT count(*) FROM transcript_segments").fetchone()[0], 0)
+
+    def test_summary_is_saved_once_and_cleared_with_results(self) -> None:
+        self.create_meeting("m1", "Planning", "meeting.wav", "a" * 32, "checksum", None)
+        self.repository.claim_next()
+        self.repository.complete("m1", AudioProcessResponse(
+            filename="meeting.wav", duration_seconds=1, transcript="Xin chào",
+            vad_segments=[], diarization_segments=[],
+            transcript_segments=[TranscriptSegment(start=0, end=1, speaker="SPEAKER_00", text="Xin chào")],
+        ))
+        revision = snapshot_meeting(self.repository.get_detail("m1")).revision
+        claim = self.repository.claim_summary("m1", revision)
+        self.assertIsNotNone(claim)
+        self.assertIsNone(self.repository.claim_summary("m1", revision))
+        self.assertTrue(self.repository.save_summary("m1", revision, claim, "Tóm tắt", "local", "chat", "v1"))
+        self.assertEqual(self.repository.get_summary("m1", revision).summary, "Tóm tắt")
+        self.connection.execute("UPDATE meetings SET status='processing' WHERE id='m1'")
+        self.repository.fail("m1", "test_failure")
+        self.assertIsNone(self.repository.get_summary("m1", revision))
+
+    def test_concurrent_requests_claim_summary_once(self) -> None:
+        self.create_meeting("m1", "Planning", "meeting.wav", "a" * 32, "checksum", None)
+        self.repository.claim_next()
+        self.repository.complete("m1", AudioProcessResponse(filename="meeting.wav", duration_seconds=0,
+            transcript="", vad_segments=[], diarization_segments=[], transcript_segments=[]))
+        revision = snapshot_meeting(self.repository.get_detail("m1")).revision
+        barrier = Barrier(2)
+        def claim() -> object:
+            with self.open_connection() as connection:
+                barrier.wait()
+                return MeetingRepository(connection).claim_summary("m1", revision)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            claims = list(executor.map(lambda _: claim(), range(2)))
+        self.assertEqual(sum(claim is not None for claim in claims), 1)
+
+    def test_claim_rejects_outdated_transcript_revision(self) -> None:
+        self.create_meeting("m1", "Planning", "meeting.wav", "a" * 32, "checksum", None)
+        self.repository.claim_next()
+        self.repository.complete("m1", AudioProcessResponse(filename="meeting.wav", duration_seconds=0,
+            transcript="", vad_segments=[], diarization_segments=[], transcript_segments=[]))
+        revision = snapshot_meeting(self.repository.get_detail("m1")).revision
+        self.connection.execute("UPDATE meetings SET title='Changed' WHERE id='m1'")
+        self.assertIsNone(self.repository.claim_summary("m1", revision))
+        self.assertEqual(self.connection.execute("SELECT count(*) FROM meeting_summaries").fetchone()[0], 0)
+
+    def test_expired_claim_can_be_replaced_without_old_owner_saving(self) -> None:
+        self.create_meeting("m1", "Planning", "meeting.wav", "a" * 32, "checksum", None)
+        self.repository.claim_next()
+        self.repository.complete("m1", AudioProcessResponse(filename="meeting.wav", duration_seconds=0,
+            transcript="", vad_segments=[], diarization_segments=[], transcript_segments=[]))
+        revision = snapshot_meeting(self.repository.get_detail("m1")).revision
+        old_claim = self.repository.claim_summary("m1", revision)
+        self.connection.execute("UPDATE meeting_summaries SET claimed_at=now()-interval '5 minutes' WHERE meeting_id='m1'")
+        new_claim = self.repository.claim_summary("m1", revision)
+        self.assertNotEqual(old_claim, new_claim)
+        self.assertFalse(self.repository.save_summary("m1", revision, old_claim, "Old", "local", "chat", "v1"))
+        self.assertTrue(self.repository.save_summary("m1", revision, new_claim, "New", "local", "chat", "v1"))
+        self.assertEqual(self.repository.get_summary("m1", revision).summary, "New")
 
 
     def test_publish_uses_opaque_private_name(self) -> None:
