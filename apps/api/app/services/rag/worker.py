@@ -57,7 +57,7 @@ async def synchronize_once(meetings: MeetingRepository, rag: RagRepository, clie
             rag.purge(meeting_id)
         elif snapshot.revision == revision:
             try:
-                chunks = chunk_transcript(snapshot)
+                chunks = chunk_transcript(snapshot, chunk_revision=profile.chunk_revision)
                 vectors = []
                 batch_size = max(1, min(16, 65536 // (profile.dimensions * 32)))
                 for offset in range(0, len(chunks), batch_size):

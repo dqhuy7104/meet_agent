@@ -31,6 +31,7 @@ class Settings:
     voice_match_min_cosine: float | None = None
     voice_match_min_margin: float | None = None
     model_device: str = "auto"
+    audio_max_concurrent_inferences: int = 1
     huggingface_token: str | None = None
     meeting_data_dir: Path = Path("./meeting-data")
     bot_chrome_path: Path | None = None
@@ -55,6 +56,12 @@ class Settings:
         bot_chrome_path = values.get("BOT_CHROME_PATH", "").strip()
         bot_audio_sink = values.get("BOT_AUDIO_SINK", "").strip() or None
         bot_admission_timeout_seconds = int(values.get("BOT_ADMISSION_TIMEOUT_SECONDS", "300"))
+        try:
+            audio_max_concurrent_inferences = int(values.get("AUDIO_MAX_CONCURRENT_INFERENCES", "1"))
+        except ValueError as error:
+            raise ConfigurationError("AUDIO_MAX_CONCURRENT_INFERENCES must be a positive integer") from error
+        if audio_max_concurrent_inferences < 1:
+            raise ConfigurationError("AUDIO_MAX_CONCURRENT_INFERENCES must be a positive integer")
         if not phowhisper_model:
             raise ConfigurationError("PHOWHISPER_MODEL must not be empty")
         if not whisper_model:
@@ -98,6 +105,7 @@ class Settings:
             voice_match_min_cosine=thresholds[0],
             voice_match_min_margin=thresholds[1],
             model_device=model_device,
+            audio_max_concurrent_inferences=audio_max_concurrent_inferences,
             huggingface_token=huggingface_token,
             meeting_data_dir=Path(meeting_data_dir).expanduser().resolve(),
             bot_chrome_path=Path(bot_chrome_path).expanduser().resolve() if bot_chrome_path else None,

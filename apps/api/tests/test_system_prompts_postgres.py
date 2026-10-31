@@ -64,6 +64,8 @@ class SystemPromptsPostgresTest(PostgresAsyncTestCase):
                 data = json.loads(messages[1]['content'])
                 if 'transcript' in data:
                     return '{"summary":"Synthetic summary"}'
+                if 'source_ids' in messages[0]['content']:
+                    return json.dumps({'source_ids':[s['source_id'] for s in data['sources']]})
                 return json.dumps({'status': 'answered', 'claims': [
                     {'text': 'Kế hoạch dự án', 'citation_ids': [data['sources'][0]['source_id']]}]})
         client = FakeClient()
@@ -81,6 +83,8 @@ class SystemPromptsPostgresTest(PostgresAsyncTestCase):
                 chat_model_id='chat', embedding_profile_id='p'), self.admin.id)
             self.assertEqual(answer.retrieval_status, 'answered')
             self.assertIn(payload['rag_system_prompt'], seen[-1])
-            self.assertEqual(len(seen), 2)
+            self.assertEqual(len(seen), 3)
+            self.assertIn('relevance_filter_v1', seen[1])
+            self.assertNotIn(payload['rag_system_prompt'], seen[1])
             self.assertEqual((await service.summarize(snapshot.meeting_id, self.admin.id))['summary'], 'Synthetic summary')
-            self.assertEqual(len(seen), 2)
+            self.assertEqual(len(seen), 3)

@@ -1,15 +1,18 @@
 """Query orchestration with authoritative PostgreSQL eligibility checks."""
 import hashlib
+from collections.abc import Callable
 from app.core.rag_config import RagError, RagSettings, ProviderRegistry
-from app.schemas.chat import RagQuery, SelectedMeeting
+from app.schemas.chat import RagQuery, SelectedMeeting, IndexStatus, ProfileIndexStatus, MeetingIndexStatus
 from app.services.rag.answering import generate_answer, insufficient
 from app.services.rag.chunking import estimate_tokens, snapshot_meeting
 from app.services.rag.prompt import build_messages
 from app.services.rag.ranking import rank_candidates, select_context
+from app.services.rag.relevance import filter_sources, select_relevance_context, FILTER_VERSION, FILTER_HASH
 from app.services.llm.summarizer import PROMPT_VERSION as SUMMARY_PROMPT_VERSION, summarize_transcript
 from app.schemas.system_prompts import SystemPrompts
 from app.services.llm.summarizer import summary_prompt
 from app.services.rag.prompt import rag_prompt
+from app.services.rag.types import SourceChunk
 
 
 class QueryService:
@@ -99,18 +102,64 @@ class QueryService:
             return self.access.meeting_ids(project_id)
         return self.meetings.completed_meeting_ids()
 
-    async def catalog(self):
+    async def catalog(self, project_id: str | None = None):
         ready = []
+        meeting_ids = self.visible_meeting_ids(project_id)
         for profile in self.settings.profiles:
             try:
-                if await self.ready(profile.id):
+                if await self.ready(profile.id, meeting_ids):
                     ready.append(profile.id)
             except RagError as error:
                 if error.code not in {'profile_not_ready', 'immutable_profile_changed'}:
                     raise
         return self.registry.catalog(ready)
 
-    async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str) -> dict:
+    async def index_status(self, project_id: str | None = None) -> IndexStatus:
+        meeting_ids = self.visible_meeting_ids(project_id)
+        profiles = []
+        safe_codes = {'provider_timeout', 'provider_unavailable', 'invalid_provider_response',
+                      'embedding_revision_changed', 'attempts_exhausted'}
+        for profile in self.settings.profiles:
+            statuses = []
+            configuration_status = 'valid'
+            try:
+                await self.rag.call('validate_profile', profile)
+            except RagError as error:
+                if error.code not in {'profile_not_ready', 'immutable_profile_changed'}:
+                    raise
+                configuration_status = 'changed' if error.code == 'immutable_profile_changed' else 'not_registered'
+            rows = await self.rag.call('index_states', profile.id, meeting_ids)
+            for meeting_id, published, job_revision, job_state, attempts, failure, expired in rows:
+                if meeting_id not in meeting_ids or (self.access and not self.access.can_read(meeting_id)):
+                    continue
+                detail = self.meetings.get_detail(meeting_id)
+                if detail is None or detail.meeting.status != 'completed':
+                    continue
+                revision = snapshot_meeting(detail).revision
+                state, failure_code = 'pending', None
+                if published == revision:
+                    state = 'ready'
+                elif job_revision == revision and job_state in {'pending', 'running', 'failed'}:
+                    state = job_state
+                    if state == 'running' and expired:
+                        state = 'failed' if attempts >= 3 else 'pending'
+                        failure_code = 'attempts_exhausted' if attempts >= 3 else 'lease_expired'
+                    elif failure:
+                        failure_code = failure if failure in safe_codes else 'index_failed'
+                elif published is not None:
+                    state = 'stale'
+                if configuration_status != 'valid':
+                    state = 'stale' if configuration_status == 'changed' else 'pending'
+                    failure_code = 'immutable_profile_changed' if configuration_status == 'changed' else None
+                statuses.append(MeetingIndexStatus(meeting_id=meeting_id,
+                    title=detail.meeting.title or detail.meeting.original_filename,
+                    state=state, attempts=attempts if job_revision == revision else 0, failure_code=failure_code))
+            profiles.append(ProfileIndexStatus(profile_id=profile.id, configuration_status=configuration_status, meetings=statuses))
+        visible = set(self.visible_meeting_ids(project_id))
+        return IndexStatus(profiles=[p.model_copy(update={'meetings':[m for m in p.meetings if m.meeting_id in visible]})
+                                     for p in profiles])
+
+    async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str, context_weight: float = .8) -> dict:
         profile = self.registry.resolve_profile(profile_id)
         selection = self.registry.resolve_chat(provider_id, model_id)
         if not await self.ready(profile_id):
@@ -127,9 +176,11 @@ class QueryService:
                     prompt_hash=hashlib.sha256(rag_prompt(self.system_prompts.rag_system_prompt).encode()).hexdigest(),
                     chat_provider_id=provider_id, chat_model=selection.model.model_dump(),
                     min_cosine_similarity=self.settings.min_cosine_similarity,
+                    retrieval_version=self.settings.retrieval_version,
+                    ranking_weights={'cosine':context_weight,'keyword':1-context_weight}, relevance_filter_version=FILTER_VERSION, relevance_filter_hash=FILTER_HASH,
                     provider_versions='unavailable', device='unavailable')
 
-    async def query(self, request: RagQuery):
+    async def retrieve(self, request: RagQuery, record_sources: Callable[[list[SourceChunk]], None] | None = None, token_budget: int | None = None):
         selection = self.registry.resolve_chat(request.chat_provider_id, request.chat_model_id)
         profile = self.registry.resolve_profile(request.embedding_profile_id)
         if request.k > self.settings.max_k:
@@ -138,31 +189,53 @@ class QueryService:
         if request.meeting_ids is not None:
             meeting_ids = [item for item in meeting_ids if item in request.meeting_ids]
         if not meeting_ids:
-            return insufficient(self.settings.prompt_version)
+            return [], []
         if not await self.ready(profile.id, meeting_ids):
             raise RagError('profile_not_ready', 409)
         vector = (await self.client.embed(profile, [request.question]))[0]
         current_ids = self.visible_meeting_ids(request.project_id)
         meeting_ids = [item for item in meeting_ids if item in current_ids]
         if not meeting_ids:
-            return insufficient(self.settings.prompt_version)
-        vectors, texts = await self.rag.call('search', profile.id, request.question, vector, meeting_ids)
+            return [], []
+        arguments = (profile.id, request.question, vector, meeting_ids)
+        if self.settings.retrieval_version != 'hybrid-v1':
+            arguments += (self.settings.retrieval_version,)
+        vectors, texts = await self.rag.call('search', *arguments)
         ranked = rank_candidates(request.question, [c for c in vectors if c.chunk.meeting_id in meeting_ids and self.eligible(c.chunk)],
-                                 [c for c in texts if c.chunk.meeting_id in meeting_ids and self.eligible(c.chunk)], self.settings.min_cosine_similarity)
+                                 [c for c in texts if c.chunk.meeting_id in meeting_ids and self.eligible(c.chunk)],
+                                 self.settings.min_cosine_similarity, self.settings.retrieval_version, request.context_weight)
         overhead = sum(estimate_tokens(m['content']) + 16 for m in build_messages(
             request.question, [], self.settings.prompt_version, self.system_prompts.rag_system_prompt))
         budget = selection.model.context_tokens - selection.model.output_tokens - overhead - 256
+        if token_budget is not None:
+            budget = min(budget,token_budget)
         if budget < 0:
             raise RagError('prompt_too_long', 422)
+        candidates = [s for s in select_relevance_context(request.question, ranked, selection) if self.eligible(s)]
+        if record_sources:
+            record_sources(candidates)
+        filtered = await filter_sources(request.question, candidates, selection, self.client)
+        if any(not self.eligible(s) for s in candidates):
+            return [], []
+        accepted = {s.source_id for s in filtered}
+        ranked = [c for c in ranked if c.chunk.source_id in accepted]
         sources = select_context(ranked, request.k, max(0, budget))
         # Recheck after all awaited retrieval work and immediately before dispatch.
         sources = [s for s in sources if self.eligible(s)]
+        return sources, ranked
+
+    async def query(self, request: RagQuery, record_sources: Callable[[list[SourceChunk]], None] | None = None):
+        sources, ranked = await self.retrieve(request, record_sources)
+        selection = self.registry.resolve_chat(request.chat_provider_id, request.chat_model_id)
         answer = await generate_answer(request.question, sources, selection, self.client,
                                        self.settings.prompt_version, self.system_prompts.rag_system_prompt)
         if any(not self.eligible(s) for s in sources):
             return insufficient(self.settings.prompt_version)
         selected = {}
+        used_ids = {citation.source_id for citation in answer.citations}
         for source in sources:
+            if source.source_id not in used_ids:
+                continue
             score = next(c.relevance_score for c in ranked if c.chunk.source_id == source.source_id)
             if source.meeting_id not in selected:
                 selected[source.meeting_id] = SelectedMeeting(meeting_id=source.meeting_id, title=source.meeting_title, relevance_score=score)

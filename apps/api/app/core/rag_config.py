@@ -63,7 +63,7 @@ class EmbeddingProfile(StrictModel):
     model: str = Field(min_length=1)
     revision: str = Field(min_length=1)
     dimensions: int = Field(ge=1, le=16384)
-    chunk_revision: Literal['utf8-v1'] = 'utf8-v1'
+    chunk_revision: Literal['utf8-v1', 'turns-v2'] = 'utf8-v1'
 
 
 @dataclass(frozen=True)
@@ -80,6 +80,7 @@ class RagSettings:
     max_k: int = 10
     prompt_version: str = 'meeting_qa_v1'
     min_cosine_similarity: float = .35
+    retrieval_version: Literal['hybrid-v1', 'lexical-v2'] = 'hybrid-v1'
 
 
 def load_rag_settings(environment: Mapping[str, str]) -> RagSettings:
@@ -118,9 +119,12 @@ def load_rag_settings(environment: Mapping[str, str]) -> RagSettings:
         max_k = int(environment.get('RAG_MAX_K', '10'))
         minimum = float(environment.get('RAG_MIN_COSINE_SIMILARITY', '.35'))
         version = environment.get('RAG_PROMPT_VERSION', 'meeting_qa_v1')
+        retrieval_version = environment.get('RAG_RETRIEVAL_VERSION', 'hybrid-v1')
+        if retrieval_version not in {'hybrid-v1', 'lexical-v2'}:
+            raise ValueError()
         if not 1 <= max_k <= 100 or not 0 <= minimum <= 1 or version != 'meeting_qa_v1':
             raise ValueError()
-        return RagSettings(True, tuple(providers), profiles, max_k, version, minimum)
+        return RagSettings(True, tuple(providers), profiles, max_k, version, minimum, retrieval_version)
     except (ValueError, TypeError, KeyError, ValidationError):
         raise RagError('invalid_configuration') from None
 

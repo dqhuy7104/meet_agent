@@ -39,11 +39,11 @@ async def generate_answer(question: str, sources: list[SourceChunk], selection: 
     used = []
     lines = []
     for claim in generation.claims:
-        if not claim.text.strip() or '[' in claim.text or ']' in claim.text:
+        if not claim.text.strip() or '[' in claim.text or ']' in claim.text or any(i in claim.text for i in known):
             return insufficient(prompt_version)
         if len(set(claim.citation_ids)) != len(claim.citation_ids) or any(i not in known for i in claim.citation_ids):
             return insufficient(prompt_version)
-        lines.append(claim.text.strip() + ' ' + ' '.join(f'[{i}]' for i in claim.citation_ids))
+        lines.append(claim.text.strip())
         used.extend(i for i in claim.citation_ids if i not in used)
     citations = [Citation(source_id=i, meeting_id=known[i].meeting_id, meeting_title=known[i].meeting_title,
                           speaker=known[i].speaker, start_seconds=known[i].start_seconds,

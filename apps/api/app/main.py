@@ -20,6 +20,8 @@ app.include_router(audio_router, prefix="/api")
 app.include_router(meetings_router, prefix="/api")
 app.include_router(bot_sessions_router, prefix="/api")
 app.include_router(chat_router, prefix="/api")
+from app.api.routes.conversations import router as conversations_router
+app.include_router(conversations_router,prefix='/api')
 
 
 @app.exception_handler(DatabaseUnavailableError)

@@ -33,7 +33,8 @@ class AnswerTest(unittest.IsolatedAsyncioTestCase):
         answer = await generate_answer('Ai?', [source], selection, client, 'meeting_qa_v1')
         self.assertEqual(answer.retrieval_status, 'answered')
         self.assertEqual(answer.citations[0].start_seconds, 1)
-        self.assertIn('[' + source.source_id + ']', answer.answer)
+        self.assertEqual(answer.answer, 'Kế hoạch')
+        self.assertEqual(answer.citations[0].source_id, source.source_id)
 
     def test_injection_is_user_data(self):
         from dataclasses import replace

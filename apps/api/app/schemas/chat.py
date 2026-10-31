@@ -1,15 +1,23 @@
 """Public meeting question-answering contracts."""
 from typing import Annotated, Literal
-from pydantic import Field, StrictInt, field_validator
+from pydantic import Field, StrictInt, StrictFloat, StrictBool, field_validator
 from app.core.rag_config import StrictModel, EmbeddingProfile, ChatModel
 
 
-class RagQuery(StrictModel):
-    question: str = Field(min_length=1, max_length=2000)
+class RetrievalConfig(StrictModel):
     k: Annotated[StrictInt, Field(ge=1)]
     chat_provider_id: str = Field(min_length=1, max_length=200)
     chat_model_id: str = Field(min_length=1, max_length=200)
     embedding_profile_id: str = Field(min_length=1, max_length=200)
+    context_weight: Annotated[StrictFloat, Field(ge=0, le=1, allow_inf_nan=False)] = .8
+
+
+class ConversationConfig(RetrievalConfig):
+    allow_model_knowledge: StrictBool = False
+
+
+class RagQuery(RetrievalConfig):
+    question: str = Field(min_length=1, max_length=2000)
     project_id: str | None = Field(default=None, min_length=1, max_length=200)
     meeting_ids: list[Annotated[str, Field(min_length=1, max_length=200)]] | None = Field(default=None, max_length=100)
 
@@ -42,12 +50,19 @@ class SelectedMeeting(StrictModel):
     relevance_score: float
 
 
+class AnswerPart(StrictModel):
+    kind: Literal['meeting', 'model', 'conversation']
+    text: str = Field(min_length=1, max_length=10000)
+    citation_ids: list[str] = Field(default_factory=list, max_length=100)
+
+
 class RagAnswer(StrictModel):
     answer: str
     retrieval_status: Literal['answered', 'insufficient_evidence']
     prompt_version: str
     selected_meetings: list[SelectedMeeting] = Field(default_factory=list)
     citations: list[Citation] = Field(default_factory=list)
+    parts: list[AnswerPart] = Field(default_factory=list, max_length=100)
 
 
 class MeetingSummary(StrictModel):
@@ -77,6 +92,24 @@ class ProviderCatalog(StrictModel):
     embedding_profiles: list[ProfileChoice]
 
 
+class MeetingIndexStatus(StrictModel):
+    meeting_id: str
+    title: str
+    state: Literal['ready', 'pending', 'running', 'failed', 'stale']
+    attempts: int = 0
+    failure_code: str | None = None
+
+
+class ProfileIndexStatus(StrictModel):
+    profile_id: str
+    configuration_status: Literal['valid', 'not_registered', 'changed'] = 'valid'
+    meetings: list[MeetingIndexStatus] = Field(default_factory=list)
+
+
+class IndexStatus(StrictModel):
+    profiles: list[ProfileIndexStatus]
+
+
 class EvaluationState(StrictModel):
     meeting_revisions: dict[str, str]
     embedding_profile: EmbeddingProfile
@@ -85,5 +118,9 @@ class EvaluationState(StrictModel):
     chat_provider_id: str
     chat_model: ChatModel
     min_cosine_similarity: float
+    retrieval_version: Literal['hybrid-v1', 'lexical-v2'] = 'hybrid-v1'
+    ranking_weights: dict[str, float] = Field(default_factory=dict)
+    relevance_filter_version: str = ''
+    relevance_filter_hash: str = ''
     provider_versions: str
     device: str

@@ -44,7 +44,7 @@ services:
 
   api:
     <<: *backend
-    command: ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-access-log"]
+    command: ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-access-log", "--no-proxy-headers"]
     depends_on:
       migrate:
         condition: service_completed_successfully

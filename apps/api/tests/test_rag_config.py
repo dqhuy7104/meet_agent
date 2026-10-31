@@ -16,6 +16,18 @@ def environment(kind='openai_compatible'):
 
 
 class ConfigTest(unittest.TestCase):
+    def test_experimental_versions_are_opt_in_and_profiles_remain_explicit(self):
+        self.assertEqual(load_rag_settings(environment()).retrieval_version, 'hybrid-v1')
+        env = environment() | {'RAG_RETRIEVAL_VERSION':'lexical-v2'}
+        profiles = json.loads(env['RAG_EMBEDDING_PROFILES_JSON'])
+        profiles[0].update(id='new-profile', chunk_revision='turns-v2')
+        env['RAG_EMBEDDING_PROFILES_JSON'] = json.dumps(profiles)
+        settings = load_rag_settings(env)
+        self.assertEqual(settings.retrieval_version, 'lexical-v2')
+        self.assertEqual(settings.profiles[0].chunk_revision, 'turns-v2')
+        with self.assertRaisesRegex(RagError, 'invalid_configuration'):
+            load_rag_settings(env | {'RAG_RETRIEVAL_VERSION':'unknown'})
+
     def test_query_boundaries(self):
         values = dict(question='  Xin chào  ', k=1, chat_provider_id='local', chat_model_id='chat', embedding_profile_id='p')
         self.assertEqual(RagQuery(**values).question, 'Xin chào')

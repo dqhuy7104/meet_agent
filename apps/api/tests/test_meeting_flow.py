@@ -78,10 +78,14 @@ class MeetingFlowTest(PostgresAsyncTestCase):
                                 TranscriptSegment(start=0.0, end=1.0, speaker="SPEAKER_00", text="Xin chào")
                             ],
                         )
+                        def transcribe(clip, *, return_timestamps):
+                            self.assertTrue(return_timestamps)
+                            return {"text": "Xin chào"}
+
                         with patch("app.services.meetings.worker.process_audio", return_value=result), patch(
                             "app.pipelines.meeting_pipeline.get_speech_timestamps",
                             return_value=[{"start": 0, "end": SAMPLE_RATE}],
-                        ), patch.object(models, "get_asr", return_value=lambda clip: {"text": "Xin chào"}):
+                        ), patch.object(models, "get_asr", return_value=transcribe):
                             self.assertTrue(run_once(repository, data_dir, Settings(meeting_data_dir=data_dir), self.database))
                             legacy = await client.post(
                                 "/api/audio/process", files={"file": ("meeting.wav", audio, "audio/wav")}

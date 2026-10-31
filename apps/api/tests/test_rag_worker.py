@@ -30,6 +30,16 @@ class WorkerTest(unittest.IsolatedAsyncioTestCase):
     def tearDown(self):
         PostgresTest.tearDown(self)
 
+    async def test_worker_uses_configured_chunk_revision(self):
+        from dataclasses import replace
+        complete_meeting(self.meetings)
+        profile = self.settings.profiles[0].model_copy(update={'id':'turn-profile','chunk_revision':'turns-v2'})
+        settings = replace(self.settings, profiles=(profile,))
+        await synchronize_once(self.meetings, self.repository, self.client, settings)
+        payload = self.connection.execute('SELECT payload FROM rag_chunks WHERE profile_id=%s', (profile.id,)).fetchone()[0]
+        self.assertEqual(payload['chunk_revision'], 'turns-v2')
+        self.assertIn(':turns-v2:', payload['source_id'])
+
     async def test_backfill_empty_and_repeat_after_publish_ack_crash(self):
         complete_meeting(self.meetings)
         with patch('app.services.rag.worker.acknowledge', side_effect=RuntimeError('crash')):

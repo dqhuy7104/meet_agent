@@ -22,4 +22,4 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY --chown=meeting:meeting apps/api/app ./apps/api/app
 
-CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-access-log"]
+CMD ["uv", "run", "--no-sync", "uvicorn", "app.main:app", "--host", "127.0.0.1", "--port", "8000", "--no-access-log", "--no-proxy-headers"]

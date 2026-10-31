@@ -1,6 +1,7 @@
 """Deterministic UTF-8 windows retaining original segment timing."""
 import hashlib
 import json
+import re
 from dataclasses import asdict, replace
 from app.services.meetings.repository import MeetingDetail
 from app.services.rag.types import MeetingSnapshot, SourceChunk, SourceSegment
@@ -35,12 +36,39 @@ def _split(segment: SourceSegment, max_bytes: int) -> list[SourceSegment]:
     return pieces
 
 
-def chunk_transcript(snapshot: MeetingSnapshot, target_tokens: int = 400, overlap_tokens: int = 60) -> list[SourceChunk]:
+def _sentence_pieces(segment: SourceSegment, max_bytes: int) -> list[SourceSegment]:
+    pieces = []
+    for sentence in re.split(r'(?<=[.!?])(?=\s)', segment.text):
+        if len(sentence.encode('utf-8')) <= max_bytes:
+            if sentence:
+                pieces.append(replace(segment, text=sentence))
+            continue
+        text = ''
+        for word in re.findall(r'\S+\s*|\s+', sentence):
+            if len((text + word).encode('utf-8')) > max_bytes:
+                if text:
+                    pieces.append(replace(segment, text=text))
+                    text = ''
+                if len(word.encode('utf-8')) > max_bytes:
+                    pieces.extend(_split(replace(segment, text=word), max_bytes))
+                    continue
+            text += word
+        if text:
+            pieces.append(replace(segment, text=text))
+    return pieces
+
+
+def chunk_transcript(snapshot: MeetingSnapshot, target_tokens: int = 400, overlap_tokens: int = 60,
+                     chunk_revision: str = 'utf8-v1') -> list[SourceChunk]:
     if target_tokens < 2 or not 0 <= overlap_tokens < target_tokens:
         raise ValueError('invalid_chunk_budget')
+    if chunk_revision not in {'utf8-v1', 'turns-v2'}:
+        raise ValueError('unknown_chunk_revision')
     # Small pieces allow overlap inside an oversized transcript region.
     piece_tokens = max(2, overlap_tokens or target_tokens)
-    pieces = [piece for s in snapshot.segments if s.text.strip() for piece in _split(s, piece_tokens * 3)]
+    pieces = [piece for s in snapshot.segments if s.text.strip()
+              for piece in (_sentence_pieces(s, target_tokens * 3) if chunk_revision == 'turns-v2'
+                            else _split(s, piece_tokens * 3))]
     chunks = []
     start = 0
     while start < len(pieces):
@@ -54,7 +82,7 @@ def chunk_transcript(snapshot: MeetingSnapshot, target_tokens: int = 400, overla
             text = proposed
             end += 1
         ordinal = len(chunks)
-        source_id = f'{snapshot.meeting_id}:{snapshot.revision}:utf8-v1:{ordinal}'
+        source_id = f'{snapshot.meeting_id}:{snapshot.revision}:{chunk_revision}:{ordinal}'
         # Rejoin pieces from the same segment for exact metadata fidelity.
         contributing = []
         for piece in pieces[start:end]:
@@ -63,12 +91,14 @@ def chunk_transcript(snapshot: MeetingSnapshot, target_tokens: int = 400, overla
             else:
                 contributing.append(piece)
         chunks.append(SourceChunk(source_id, snapshot.meeting_id, snapshot.title, snapshot.revision,
-                                  ordinal, text, tuple(contributing)))
+                                  ordinal, text, tuple(contributing), chunk_revision=chunk_revision))
         if end == len(pieces):
             break
         next_start = end
         overlap = 0
         while overlap_tokens and next_start > start + 1 and overlap < overlap_tokens:
+            if chunk_revision == 'turns-v2' and overlap + estimate_tokens(pieces[next_start-1].text) > overlap_tokens:
+                break
             next_start -= 1
             overlap += estimate_tokens(pieces[next_start].text)
         start = max(start + 1, next_start)

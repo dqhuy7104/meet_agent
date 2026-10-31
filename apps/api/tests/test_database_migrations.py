@@ -13,7 +13,7 @@ class DatabaseMigrationTest(unittest.TestCase):
         with isolated_postgres(migrate=False) as fixture:
             migrate_database(fixture.connection)
             self.assertEqual([row[0] for row in fixture.connection.execute(
-                "SELECT version FROM schema_migrations ORDER BY version").fetchall()], [1, 2, 3, 4, 5, 6, 7])
+                "SELECT version FROM schema_migrations ORDER BY version").fetchall()], [1, 2, 3, 4, 5, 6, 7, 8])
             from app.services.access.repository import AccessRepository
             project = AccessRepository(fixture.connection).create_project('Migration test')
             fixture.connection.execute("INSERT INTO meetings (id,original_filename,storage_key,checksum,created_at,updated_at,status,project_id) VALUES ('m','a.wav',%s,'hash',now(),now(),'queued',%s)", ('a'*32, project.id))
@@ -21,7 +21,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                 "SELECT voice_identification_status FROM meetings WHERE id='m'").fetchone()[0], "not_run")
             identity = fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0]
             migrate_database(fixture.connection)
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 7)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 8)
             self.assertEqual(fixture.connection.execute("SELECT instance_id FROM storage_identity").fetchone()[0], identity)
             with open_database(fixture.database) as connection:
                 validate_database(connection)
@@ -39,7 +39,7 @@ class DatabaseMigrationTest(unittest.TestCase):
                     migrate_database(connection)
             with ThreadPoolExecutor(max_workers=2) as executor:
                 list(executor.map(lambda _: migrate(), range(2)))
-            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 7)
+            self.assertEqual(fixture.connection.execute("SELECT count(*) FROM schema_migrations").fetchone()[0], 8)
 
     def test_unversioned_application_tables_are_not_adopted(self) -> None:
         with isolated_postgres(migrate=False) as fixture:

@@ -14,6 +14,40 @@ from test_rag_config import environment
 
 
 class DeadlineTest(unittest.IsolatedAsyncioTestCase):
+    async def test_filter_and_answer_share_the_original_deadline(self):
+        import json
+        from apps.api.tests.postgres_support import enter_postgres
+        from app.services.meetings.repository import MeetingRepository
+        from app.services.rag.repository import RagRepository
+        from app.services.rag.chunking import snapshot_meeting, chunk_transcript
+        from app.services.rag.request import RagRequestService, RequestDeadline
+        from app.core.rag_config import load_rag_settings
+        from app.schemas.chat import RagQuery
+        from test_rag_outbox import complete_meeting
+        fixture = enter_postgres(self)
+        meetings = MeetingRepository(fixture.connection)
+        complete_meeting(meetings)
+        settings = load_rag_settings(environment())
+        snapshot = snapshot_meeting(meetings.get_detail('m'))
+        chunks = chunk_transcript(snapshot)
+        RagRepository(fixture.connection).publish(snapshot, settings.profiles[0], chunks, [[1.,0.] for c in chunks])
+        account_id = meetings.get_meeting('m').uploaded_by_account_id
+        deadline = RequestDeadline()
+        calls = []
+        async def embed(*args): return [[1.,0.]]
+        async def generate(client, selection, messages):
+            calls.append(messages[0]['content'])
+            deadline.expires_at = time.monotonic()-1
+            sources = json.loads(messages[1]['content'])['sources']
+            return json.dumps({'source_ids':[s['source_id'] for s in sources]})
+        service = RagRequestService(settings, fixture.database)
+        request = RagQuery(question='kế hoạch', k=1, chat_provider_id='local', chat_model_id='chat', embedding_profile_id='p')
+        with patch('app.services.rag.providers.ModelClient.embed', embed), patch('app.services.rag.providers.ModelClient.generate', generate):
+            with self.assertRaisesRegex(RagError, '^query_timeout$'):
+                await asyncio.to_thread(service._serve, deadline, 'query', (request, account_id))
+        self.assertEqual(len(calls), 1)
+        self.assertIn('relevance_filter_v1', calls[0])
+
     async def test_deadline_returns_while_database_dependency_is_blocked(self):
         release=threading.Event()
         def blocked(settings, **kwargs):

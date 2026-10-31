@@ -8,6 +8,7 @@ from app.services.rag.providers import validate_vectors
 from app.services.meetings.repository import MeetingRepository
 from app.services.rag.chunking import snapshot_meeting
 from app.services.rag.types import Candidate, MeetingSnapshot, SourceChunk, SourceSegment
+from app.services.rag.ranking import content_tokens
 
 
 def _chunk(payload: dict) -> SourceChunk:
@@ -99,7 +100,18 @@ class RagRepository:
         row = self.connection.execute('SELECT ready FROM rag_embedding_profiles WHERE id=%s', (profile_id,)).fetchone()
         return bool(row and row[0])
 
-    def search(self, profile_id: str, question: str, vector: list[float], meeting_ids: list[str]) -> tuple[list[Candidate], list[Candidate]]:
+    def index_states(self, profile_id: str, meeting_ids: list[str]) -> list[tuple]:
+        return self.connection.execute('''SELECT m.id,p.revision,j.revision,j.state,
+            coalesce(j.attempts,0),j.failure_code,
+            coalesce(j.state='running' AND j.lease_until<now(),false)
+            FROM meetings m
+            LEFT JOIN rag_publications p ON p.meeting_id=m.id AND p.profile_id=%s
+            LEFT JOIN rag_index_jobs j ON j.meeting_id=m.id AND j.profile_id=%s
+            WHERE m.id=ANY(%s) AND m.status='completed' ORDER BY m.id''',
+            (profile_id, profile_id, meeting_ids)).fetchall()
+
+    def search(self, profile_id: str, question: str, vector: list[float], meeting_ids: list[str],
+               retrieval_version: str = 'hybrid-v1') -> tuple[list[Candidate], list[Candidate]]:
         definition = self.connection.execute('SELECT definition FROM rag_embedding_profiles WHERE id=%s', (profile_id,)).fetchone()
         if not definition:
             raise RagError('profile_not_ready', 409)
@@ -117,10 +129,16 @@ class RagRepository:
         vectors = self.connection.execute(base + ''' SELECT payload,cosine FROM
             (SELECT *,row_number() OVER(PARTITION BY meeting_id ORDER BY cosine DESC,source_id) AS position FROM scored) diversified
             ORDER BY position,cosine DESC,source_id LIMIT 50''', parameters).fetchall()
-        texts = self.connection.execute(base + """ , lexical AS
-            (SELECT *,ts_rank(document,plainto_tsquery('simple',%s)) AS lexical_score FROM scored
-             WHERE document @@ plainto_tsquery('simple',%s))
+        query_function, lexical_query = 'plainto_tsquery', question
+        if retrieval_version == 'lexical-v2':
+            query_function = 'to_tsquery'
+            lexical_query = ' | '.join("'" + token + "'" for token in sorted(content_tokens(question)))
+            if not lexical_query:
+                return [Candidate(_chunk(p), float(c)) for p, c in vectors], []
+        texts = self.connection.execute(base + f""" , lexical AS
+            (SELECT *,ts_rank(document,{query_function}('simple',%s)) AS lexical_score FROM scored
+             WHERE document @@ {query_function}('simple',%s))
             SELECT payload,cosine FROM (SELECT *,row_number() OVER
             (PARTITION BY meeting_id ORDER BY lexical_score DESC,source_id) AS position FROM lexical) diversified
-            ORDER BY position,lexical_score DESC,source_id LIMIT 50""", parameters + (question, question)).fetchall()
+            ORDER BY position,lexical_score DESC,source_id LIMIT 50""", parameters + (lexical_query, lexical_query)).fetchall()
         return ([Candidate(_chunk(p), float(c)) for p, c in vectors], [Candidate(_chunk(p), float(c)) for p, c in texts])

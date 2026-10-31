@@ -8,6 +8,7 @@ import time
 from app.core.database_config import DatabaseSettings, DatabaseUnavailableError
 from app.core.rag_config import RagError, RagSettings, ProviderRegistry
 from app.schemas.chat import RagQuery
+from app.schemas.conversations import ConversationCreate, ConversationDetail, ConversationList, ConversationSummary, ConversationTurn, TurnRequest
 
 
 @dataclass
@@ -111,16 +112,22 @@ class RagRequestService:
                             return result
                     async with httpx.AsyncClient() as http:
                         client = ModelClient(self.registry, http, deadline.remaining)
-                        prompts = PromptRepository(connection).get() if action in {'query', 'summarize', 'evaluation_state'} else None
+                        prompts = PromptRepository(connection).get() if action in {'query', 'summarize', 'evaluation_state', 'append_turn'} else None
                         service = QueryService(self.settings, self.registry, Source(), Database(), client, Scope(), prompts)
+                        if action in {'create_conversation','list_conversations','get_conversation','update_conversation','delete_conversation','append_turn'}:
+                            from app.services.conversations.service import ConversationService
+                            service = ConversationService(connection,service,account_id,deadline)
                         return await getattr(service, action)(*arguments[:-1])
             except (psycopg.Error, DatabaseUnavailableError):
                 deadline.remaining()
                 raise RagError('index_unavailable') from None
         return asyncio.run(run())
 
-    async def catalog(self, account_id: str):
-        return await self._invoke('catalog', account_id)
+    async def catalog(self, account_id: str, project_id: str | None = None):
+        return await self._invoke('catalog', project_id, account_id)
+
+    async def index_status(self, account_id: str, project_id: str | None = None):
+        return await self._invoke('index_status', project_id, account_id)
 
     async def query(self, request: RagQuery, account_id: str):
         self.registry.resolve_chat(request.chat_provider_id, request.chat_model_id)
@@ -132,5 +139,23 @@ class RagRequestService:
     async def summarize(self, meeting_id: str, account_id: str) -> dict[str, str]:
         return await self._invoke('summarize', meeting_id, account_id)
 
-    async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str, account_id: str):
-        return await self._invoke('evaluation_state', profile_id, provider_id, model_id, account_id)
+    async def evaluation_state(self, profile_id: str, provider_id: str, model_id: str, account_id: str, context_weight: float = .8):
+        return await self._invoke('evaluation_state', profile_id, provider_id, model_id, context_weight, account_id)
+
+    async def create_conversation(self, body: ConversationCreate, account_id: str) -> ConversationSummary:
+        return await self._invoke('create_conversation',body,account_id)
+
+    async def list_conversations(self, view: str, cursor: str | None, account_id: str) -> ConversationList:
+        return await self._invoke('list_conversations',view,cursor,account_id)
+
+    async def get_conversation(self, conversation_id: str, before: int | None, account_id: str) -> ConversationDetail:
+        return await self._invoke('get_conversation',conversation_id,before,account_id)
+
+    async def update_conversation(self, conversation_id: str, body: ConversationCreate, account_id: str) -> ConversationSummary:
+        return await self._invoke('update_conversation',conversation_id,body,account_id)
+
+    async def delete_conversation(self, conversation_id: str, account_id: str) -> None:
+        await self._invoke('delete_conversation',conversation_id,account_id)
+
+    async def append_turn(self, conversation_id: str, request: TurnRequest, account_id: str) -> ConversationTurn:
+        return await self._invoke('append_turn',conversation_id,request,account_id)

@@ -1,9 +1,11 @@
 // @vitest-environment jsdom
-import {afterEach,expect,it,vi} from 'vitest';
+import {afterEach,beforeEach,expect,it,vi} from 'vitest';
 import {cleanup,fireEvent,render,screen,waitFor} from '@testing-library/react';
 import {MemoryRouter} from 'react-router-dom';
 import App from '../App';
 import {MeetingSearchChat} from './MeetingSearchChat';
+import {AuthProvider} from '../lib/AuthProvider';
+beforeEach(()=>{HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','');};HTMLDialogElement.prototype.close=function(){this.removeAttribute('open');this.dispatchEvent(new Event('close'));};});
 afterEach(()=>{cleanup();vi.unstubAllGlobals();});
 const account={id:'me',email:'me@example.test',is_system_admin:false,is_disabled:false};
 const project={id:'p',name:'Visible project',role:'member',is_archived:false};
@@ -18,8 +20,12 @@ function backend(meetingSource='upload',archived=false){
  else if(url==='/api/meetings/m')body={id:'m',project_id:'p',uploaded_by_account_id:'me',source:meetingSource,title:'Meeting title',status:'completed',audio_files:[],transcript_segments:[],diarization_segments:[],speaker_identities:[]};
  else if(url==='/api/bot-sessions/active'||url==='/api/bot-sessions/recent')return {ok:true,status:204};
  else if(url==='/api/voice-profiles')body=[];
- else if(url==='/api/chat/providers')body={max_k:5,providers:[{id:'local',name:'Local',is_external:false,chat_models:['model']}],embedding_profiles:[{id:'embed',provider_id:'local'}]};
- else if(url==='/api/chat/queries')body={answer:'Answer',retrieval_status:'answered',selected_meetings:[],citations:[]};
+ else if(url.startsWith('/api/chat/providers'))body={max_k:5,providers:[{id:'local',name:'Local',is_external:false,chat_models:['model']}],embedding_profiles:[{id:'embed',provider_id:'local'}]};
+ else if(url.startsWith('/api/chat/index-status'))body={profiles:[{profile_id:'embed',meetings:[{meeting_id:'m',title:'Pending meeting',state:'pending',attempts:0,failure_code:null}]}]};
+ else if(url==='/api/chat/conversations'&&options?.method==='POST')body={id:'c',title:'Hội thoại mới',project_id:JSON.parse(options.body as string).project_id,last_ordinal:0,config:null,read_only:false};
+ else if(url.startsWith('/api/chat/conversations?'))body={items:[],next_cursor:null};
+ else if(url==='/api/chat/conversations/c/turns')body={id:'turn',ordinal:1,status:'completed',question:'What happened?',answer:{answer:'Answer',retrieval_status:'answered',selected_meetings:[],citations:[]}};
+ else if(url==='/api/chat/conversations/c')body={conversation:{id:'c',title:'Saved',project_id:'p',last_ordinal:1,config:{k:3,chat_provider_id:'local',chat_model_id:'model',embedding_profile_id:'embed',context_weight:.8},read_only:false},turns:[{id:'turn',ordinal:1,status:'completed',question:'What happened?',answer:{answer:'Answer',retrieval_status:'answered',selected_meetings:[],citations:[]}}],next_before_ordinal:null};
  return {ok:status<400,status,json:async()=>body};
  });
 }
@@ -46,8 +52,15 @@ it('deletes a completed meeting after confirmation and returns to the project li
 it('does not expose create controls on archived projects',async()=>{vi.stubGlobal('fetch',backend('upload',true));render(<MemoryRouter initialEntries={['/projects/p']}><App/></MemoryRouter>);await screen.findByText('Visible project');expect(screen.queryByRole('button',{name:'Tải audio'})).toBeNull();expect(screen.queryByRole('button',{name:'Thêm Bot'})).toBeNull();});
 it('handles inaccessible direct meeting links safely',async()=>{vi.stubGlobal('fetch',backend());render(<MemoryRouter initialEntries={['/workspace/private']}><App/></MemoryRouter>);await screen.findByText('Meeting not found');expect(screen.queryByRole('audio')).toBeNull();expect(screen.queryByText('Transcript')).toBeNull();});
 it('defaults chat to all visible projects and sends a selected project',async()=>{
- const fetcher=backend();vi.stubGlobal('fetch',fetcher);render(<MemoryRouter><MeetingSearchChat/></MemoryRouter>);const selector=await screen.findByLabelText('Dự án');await screen.findByText('Visible project');expect((selector as HTMLSelectElement).value).toBe('');expect(screen.getAllByRole('option').some(option=>option.textContent==='Invisible project')).toBe(false);
- fireEvent.change(selector,{target:{value:'p'}});fireEvent.change(screen.getByLabelText('Câu hỏi'),{target:{value:'What happened?'}});fireEvent.click(screen.getByRole('button',{name:'Tìm câu trả lời'}));await screen.findByText('Answer');const call=fetcher.mock.calls.find(([url])=>url==='/api/chat/queries');expect(JSON.parse(call?.[1]?.body as string).project_id).toBe('p');
+ const fetcher=backend();vi.stubGlobal('fetch',fetcher);render(<MemoryRouter><AuthProvider><MeetingSearchChat/></AuthProvider></MemoryRouter>);fireEvent.click(await screen.findByRole('button',{name:'Cấu hình'}));const selector=await screen.findByLabelText('Dự án');await screen.findByText('Visible project');expect((selector as HTMLSelectElement).value).toBe('');expect(screen.getAllByRole('option').some(option=>option.textContent==='Invisible project')).toBe(false);
+ fireEvent.change(selector,{target:{value:'p'}});fireEvent.change(screen.getByLabelText('Câu hỏi'),{target:{value:'What happened?'}});
+ await waitFor(()=>expect((screen.getByRole('button',{name:'Gửi'}) as HTMLButtonElement).disabled).toBe(false));
+ fireEvent.click(screen.getByRole('button',{name:'Gửi'}));await screen.findByText('Answer');const call=fetcher.mock.calls.find(([url])=>url==='/api/chat/conversations');expect(JSON.parse(call?.[1]?.body as string).project_id).toBe('p');
+ expect(fetcher.mock.calls.some(([url])=>url==='/api/chat/providers?project_id=p')).toBe(true);
+ expect(fetcher.mock.calls.some(([url])=>url==='/api/chat/index-status?project_id=p')).toBe(true);
+ expect(screen.getByRole('link',{name:'Pending meeting'})).toBeTruthy();
+ fireEvent.click(screen.getByRole('button',{name:'Làm mới trạng thái'}));
+ await waitFor(()=>expect(fetcher.mock.calls.filter(([url])=>url==='/api/chat/index-status?project_id=p').length).toBeGreaterThanOrEqual(2));
 });
 it('submits uploads and bot creation in the selected active project',async()=>{
  const base=backend();const fetcher=vi.fn(async(url:string,options?:RequestInit)=>{if(url==='/api/meetings'||url==='/api/bot-sessions')return {ok:true,status:200,json:async()=>({meeting_id:'m',id:'bot',status:'queued'})};return base(url,options);});vi.stubGlobal('fetch',fetcher);render(<MemoryRouter initialEntries={['/projects/p']}><App/></MemoryRouter>);await screen.findByText('Visible project');

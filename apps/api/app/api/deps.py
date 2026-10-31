@@ -1,7 +1,7 @@
 """Shared API dependencies."""
 import os
 from app.core.audio_models import ModelRegistry, get_model_registry
-from app.core.rag_config import load_rag_settings, RagError
+from app.core.rag_config import load_rag_settings, RagError, RagSettings
 from app.services.rag.request import RagRequestService
 from app.core.database_config import get_database_settings, DatabaseUnavailableError
 
@@ -21,3 +21,15 @@ async def get_rag_service() -> RagRequestService:
     except DatabaseUnavailableError:
         raise RagError('index_unavailable') from None
     return RagRequestService(settings, database)
+
+
+async def get_conversation_service() -> RagRequestService:
+    try:
+        settings = load_rag_settings(os.environ)
+    except RagError:
+        settings = RagSettings()
+    try:
+        database = get_database_settings()
+    except DatabaseUnavailableError:
+        raise RagError('index_unavailable') from None
+    return RagRequestService(settings,database)

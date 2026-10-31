@@ -1,6 +1,15 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { chatApi } from './chatApi';
 afterEach(()=>{vi.unstubAllGlobals();});
+it('scopes provider readiness and index status to the selected project',async()=>{
+  const fetch=vi.fn().mockResolvedValue({ok:true,json:async()=>({profiles:[]})});
+  vi.stubGlobal('fetch',fetch);
+  await chatApi.providers(undefined,'project a');
+  await chatApi.indexStatus(undefined,'project a');
+  expect(fetch.mock.calls.map(call=>call[0])).toEqual([
+    '/api/chat/providers?project_id=project%20a','/api/chat/index-status?project_id=project%20a',
+  ]);
+});
 it('sends only query contract and passes abort signal',async()=>{
   const fetch=vi.fn().mockResolvedValue({ok:true,json:async()=>({retrieval_status:'insufficient_evidence'})});
   vi.stubGlobal('fetch',fetch);

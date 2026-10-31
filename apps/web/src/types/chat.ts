@@ -1,4 +1,10 @@
-export type RagQuery = {question:string;k:number;chat_provider_id:string;chat_model_id:string;embedding_profile_id:string;meeting_ids?:string[];project_id?:string};
+export type RagQuery = {question:string;k:number;chat_provider_id:string;chat_model_id:string;embedding_profile_id:string;meeting_ids?:string[];context_weight?:number;project_id?:string};
 export type ProviderCatalog = {max_k:number;providers:{id:string;name:string;is_external:boolean;chat_models:string[]}[];embedding_profiles:{id:string;provider_id:string;model:string;revision:string}[]};
 export type Citation = {source_id:string;meeting_id:string;meeting_title:string;speaker:string;start_seconds:number;end_seconds:number;excerpt:string};
-export type RagAnswer = {answer:string;retrieval_status:'answered'|'insufficient_evidence';prompt_version:string;selected_meetings:{meeting_id:string;title:string;relevance_score:number}[];citations:Citation[]};
+export type RagAnswer = {answer:string;retrieval_status:'answered'|'insufficient_evidence';prompt_version:string;selected_meetings:{meeting_id:string;title:string;relevance_score:number}[];citations:Citation[];parts?:{kind:"meeting"|"model"|"conversation";text:string;citation_ids:string[]}[]};
+export type IndexStatus = {profiles:{profile_id:string;configuration_status:'valid'|'not_registered'|'changed';meetings:{meeting_id:string;title:string;state:'ready'|'pending'|'running'|'failed'|'stale';attempts:number;failure_code:string|null}[]}[]};
+export type ConversationConfig={k:number;chat_provider_id:string;chat_model_id:string;embedding_profile_id:string;context_weight:number;allow_model_knowledge?:boolean};
+export type ConversationSummary={id:string;title:string;creator_account_id:string;creator_email:string|null;project_id:string|null;config:ConversationConfig|null;created_at:string;updated_at:string;last_ordinal:number;read_only:boolean};
+export type ConversationTurn={id:string;ordinal:number;question:string|null;config:ConversationConfig|null;status:'running'|'completed'|'failed'|'interrupted'|'redacted'|'stale';answer:RagAnswer|null;failure_code:string|null;created_at:string;finished_at:string|null};
+export type ConversationDetail={conversation:ConversationSummary;turns:ConversationTurn[];next_before_ordinal:number|null};
+export type ConversationList={items:ConversationSummary[];next_cursor:string|null};

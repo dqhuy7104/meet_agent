@@ -25,6 +25,8 @@ class FlowTest(unittest.IsolatedAsyncioTestCase):
                 return getattr(self.repository, method)(*args)
         async def generate(selection, messages):
             sources=json.loads(messages[1]['content'])['sources']
+            if 'source_ids' in messages[0]['content']:
+                return json.dumps({'source_ids':[s['source_id'] for s in sources]})
             return json.dumps({'status':'answered','claims':[{'text':'Kế hoạch', 'citation_ids':[sources[0]['source_id']]}]})
         self.client.generate=generate
         service=QueryService(self.settings, ProviderRegistry(self.settings), self.meetings, Database(), self.client)
@@ -120,6 +122,8 @@ class ScopedQueryTest(unittest.IsolatedAsyncioTestCase):
             async def embed(inner, *args): return [[1., 0.]]
             async def generate(inner, selection, messages):
                 sources = json.loads(messages[1]['content'])['sources']
+                if 'source_ids' in messages[0]['content']:
+                    return json.dumps({'source_ids':[s['source_id'] for s in sources]})
                 if owner.revoke_at == 'generate': owner.allowed = []
                 return json.dumps({'status':'answered', 'claims':[{'text':'plan', 'citation_ids':[sources[0]['source_id']]}]})
         self.service = QueryService(self.settings, ProviderRegistry(self.settings), Meetings(), Database(), Client(), Scope())
@@ -129,6 +133,127 @@ class ScopedQueryTest(unittest.IsolatedAsyncioTestCase):
         answer = await self.service.query(self.request)
         self.assertEqual(self.searched, ['a'])
         self.assertEqual([citation.meeting_id for citation in answer.citations], ['a'])
+
+    async def test_filter_precedes_k_and_only_cited_meetings_are_listed(self):
+        from dataclasses import replace
+        from app.services.rag.types import Candidate
+        good = self.chunks[0]
+        distracting = replace(self.chunks[1], source_id='distractor', text='Super Bowl music')
+        calls = []
+        original_call = self.service.rag.call
+        async def storage(method, *args):
+            if method == 'search': return [Candidate(distracting, 1.), Candidate(good, .8)], []
+            if method == 'manifest': return next(c.revision for c in self.chunks if c.meeting_id == args[1])
+            return await original_call(method, *args)
+        async def generate(selection, messages):
+            sources = json.loads(messages[1]['content'])['sources']
+            calls.append([s['source_id'] for s in sources])
+            if len(calls) == 1:
+                return json.dumps({'source_ids':[s['source_id'] for s in sources if s['text'] == good.text]})
+            return json.dumps({'status':'answered','claims':[{'text':'Hợp tác giáo dục', 'citation_ids':[good.source_id]}]})
+        self.service.rag.call = storage
+        self.service.client.generate = generate
+        answer = await self.service.query(self.request.model_copy(update={'project_id':None}))
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(len(calls[0]), 2)
+        self.assertTrue(all(source_id.startswith('source_') for source_id in calls[0]))
+        self.assertEqual(calls[1], [good.source_id])
+        self.assertEqual(answer.answer, 'Hợp tác giáo dục')
+        self.assertEqual([m.meeting_id for m in answer.selected_meetings], ['a'])
+
+    async def test_accepted_but_uncited_sources_do_not_appear_as_related_meetings(self):
+        original_call = self.service.rag.call
+        async def storage(method, *args):
+            if method == 'manifest': return next(c.revision for c in self.chunks if c.meeting_id == args[1])
+            return await original_call(method, *args)
+        self.service.rag.call = storage
+        answer = await self.service.query(self.request.model_copy(update={'project_id':None, 'k':2}))
+        self.assertEqual([m.meeting_id for m in answer.selected_meetings], ['a'])
+
+    async def test_oversized_answer_prompt_skips_both_model_calls(self):
+        from dataclasses import replace
+        from app.core.rag_config import RagError
+        from app.schemas.system_prompts import SystemPrompts
+        provider = self.settings.providers[0]
+        provider = provider.model_copy(update={'chat_models':[provider.chat_models[0].model_copy(
+            update={'context_tokens':1024,'output_tokens':128})]})
+        self.service.registry = ProviderRegistry(replace(self.settings, providers=(provider,)))
+        self.service.system_prompts = SystemPrompts(rag_system_prompt='X'*8000)
+        async def generate(*args): self.fail('Oversized answer prompt must fail before either dispatch')
+        self.service.client.generate = generate
+        with self.assertRaisesRegex(RagError, '^prompt_too_long$'):
+            await self.service.query(self.request)
+
+    async def test_revocation_or_revision_change_after_filter_skips_answer_call(self):
+        for change in ['access','revision']:
+            self.allowed = ['a']
+            self.details['a'].transcript_segments[0].text = 'kế hoạch'
+            calls = []
+            async def generate(selection, messages):
+                calls.append(1)
+                sources = json.loads(messages[1]['content'])['sources']
+                if change == 'access': self.allowed = []
+                else: self.details['a'].transcript_segments[0].text = 'changed'
+                return json.dumps({'source_ids':[s['source_id'] for s in sources]})
+            self.service.client.generate = generate
+            result = await self.service.query(self.request)
+            self.assertEqual(calls, [1])
+            self.assertEqual(result.citations, [])
+            self.assertEqual(result.selected_meetings, [])
+
+    async def test_catalog_uses_selected_project_readiness(self):
+        self.assertEqual([p.id for p in (await self.service.catalog('a')).embedding_profiles], ['p'])
+        self.assertEqual((await self.service.catalog()).embedding_profiles, [])
+
+    async def test_index_status_is_scoped_and_sanitizes_failures(self):
+        original = self.service.rag.call
+        async def call(method, *args):
+            if method == 'index_states':
+                return [('a', self.chunks[0].revision, None, None, 0, None, False),
+                        ('b', None, self.chunks[1].revision, 'failed', 3, 'secret-error', False),
+                        ('hidden', None, 'r', 'failed', 2, 'private', False)]
+            return await original(method, *args)
+        self.service.rag.call = call
+        result = await self.service.index_status()
+        self.assertEqual({m.meeting_id for p in result.profiles for m in p.meetings}, {'a','b'})
+        self.assertEqual(result.profiles[0].meetings[0].state, 'ready')
+        self.assertEqual(result.profiles[0].meetings[1].state, 'failed')
+        self.assertEqual(result.profiles[0].meetings[1].failure_code, 'index_failed')
+        scoped = await self.service.index_status('a')
+        self.assertEqual([m.meeting_id for m in scoped.profiles[0].meetings], ['a'])
+
+    async def test_index_status_rechecks_access_after_storage(self):
+        async def call(method, *args):
+            if method == 'index_states':
+                self.allowed = []
+                return [('a', self.chunks[0].revision, None, None, 0, None, False)]
+        self.service.rag.call = call
+        result = await self.service.index_status()
+        self.assertEqual(result.profiles[0].meetings, [])
+
+    async def test_index_status_marks_stale_and_exhausted_leases(self):
+        async def call(method, *args):
+            return [('a', 'old', 'old', 'done', 3, None, False),
+                    ('b', None, self.chunks[1].revision, 'running', 3, None, True)]
+        self.service.rag.call = call
+        result = await self.service.index_status()
+        statuses = result.profiles[0].meetings
+        self.assertEqual([m.state for m in statuses], ['stale','failed'])
+        self.assertEqual(statuses[1].failure_code, 'attempts_exhausted')
+
+    async def test_index_status_does_not_report_changed_profile_as_ready(self):
+        from app.core.rag_config import RagError
+        async def call(method, *args):
+            if method == 'validate_profile':
+                raise RagError('immutable_profile_changed', 409)
+            return [('a', self.chunks[0].revision, None, None, 0, None, False)]
+        self.service.rag.call = call
+        result = await self.service.index_status()
+        self.assertEqual(result.profiles[0].configuration_status, 'changed')
+        self.assertEqual(result.profiles[0].meetings[0].state, 'stale')
+
+
+
 
     async def test_client_meeting_filter_only_narrows_access(self):
         answer = await self.service.query(self.request.model_copy(update={'meeting_ids':['b', 'hidden']}))
@@ -154,6 +279,10 @@ class ScopedQueryTest(unittest.IsolatedAsyncioTestCase):
         self.allowed = ['a']
         state = await self.service.evaluation_state('p', 'local', 'chat')
         self.assertEqual(list(state['meeting_revisions']), ['a'])
+        self.assertAlmostEqual(state['ranking_weights']['cosine'], .8)
+        self.assertAlmostEqual(state['ranking_weights']['keyword'], .2)
+        self.assertEqual(state['relevance_filter_version'], 'relevance_filter_v1')
+        self.assertEqual(len(state['relevance_filter_hash']), 64)
 
     async def test_default_query_uses_only_visible_meetings(self):
         self.allowed = ['a']

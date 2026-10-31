@@ -1,72 +1,70 @@
 import {useEffect,useRef,useState,type FormEvent} from 'react';
-import {Link} from 'react-router-dom';
+import {Settings, X, PanelLeft} from 'lucide-react';
+import {Link,useSearchParams} from 'react-router-dom';
 import {projectApi,type Project} from '../lib/projectApi';
 import {chatApi} from '../lib/chatApi';
-import {citationLocation,selectChatProvider,validateChatInput} from '../lib/chatState';
-import type {ProviderCatalog,RagAnswer,RagQuery} from '../types/chat';
+import {conversationApi} from '../lib/conversationApi';
+import {useAuth} from '../lib/AuthProvider';
+import {citationLocation,validateChatInput} from '../lib/chatState';
+import type {ProviderCatalog,ConversationConfig,ConversationSummary,ConversationTurn,ConversationDetail,IndexStatus} from '../types/chat';
 import './meeting-search-chat.css';
-
+const initial:ConversationConfig={k:3,chat_provider_id:'',chat_model_id:'',embedding_profile_id:'',context_weight:.8,allow_model_knowledge:false};
+const states={running:'Đang trả lời…',completed:'',failed:'Không thể hoàn tất câu hỏi.',interrupted:'Yêu cầu bị gián đoạn.',redacted:'Nội dung không còn khả dụng.',stale:'Nguồn đã thay đổi'};
 export function MeetingSearchChat(){
-  const [projects,setProjects]=useState<Project[]>([]);
-  const [catalog,setCatalog]=useState<ProviderCatalog>();
-  const [input,setInput]=useState<RagQuery>({question:'',k:3,chat_provider_id:'',chat_model_id:'',embedding_profile_id:''});
-  const [answer,setAnswer]=useState<RagAnswer>();
-  const [error,setError]=useState('');
-  const [isLoading,setIsLoading]=useState(false);
-  const active=useRef<AbortController | undefined>(undefined);
-  const question=useRef<HTMLTextAreaElement>(null);
-  useEffect(()=>{
-    const controller=new AbortController();
-    void projectApi.list().then(data=>{if(!controller.signal.aborted)setProjects(data);}).catch(cause=>{if(!controller.signal.aborted)setError(cause.message);});
-    void chatApi.providers(controller.signal).then(data=>{
-      if(controller.signal.aborted)return;
-      setCatalog(data);
-      const provider=data.providers.find(p=>p.chat_models.length);
-      setInput(value=>({...value,k:Math.min(value.k,data.max_k),chat_provider_id:provider?.id??'',chat_model_id:provider?.chat_models[0]??'',embedding_profile_id:data.embedding_profiles[0]?.id??''}));
-    }).catch(cause=>{if(!controller.signal.aborted)setError(cause instanceof Error?cause.message:'Dịch vụ hỏi đáp chưa sẵn sàng. Kiểm tra cấu hình và worker RAG.');});
-    return ()=>{controller.abort();active.current?.abort();};
-  },[]);
-  async function submit(event:FormEvent){
-    event.preventDefault();
-    if(!catalog||isLoading)return;
-    const problem=validateChatInput(input,catalog);
-    if(problem){setError(problem);question.current?.focus();return;}
-    active.current?.abort();
-    const controller=new AbortController();
-    active.current=controller;
-    setIsLoading(true);setError('');setAnswer(undefined);
-    try{
-      const result=await chatApi.query({...input,question:input.question.trim()},controller.signal);
-      if(!controller.signal.aborted&&active.current===controller)setAnswer(result);
-    }catch(cause){
-      if(!controller.signal.aborted)setError(cause instanceof Error?cause.message:'Không thể gửi câu hỏi.');
-    }finally{if(!controller.signal.aborted)setIsLoading(false);}
-  }
-  const embeddingProvider=catalog?.providers.find(p=>p.id===catalog.embedding_profiles.find(p=>p.id===input.embedding_profile_id)?.provider_id);
-  return <div className="page rag-page">
-    <section className="title"><div><small>MEETING LIBRARY</small><h2>Tìm kiếm thông tin</h2><p>Tìm bằng chứng trong tối đa K cuộc họp, kèm nguồn và thời gian.</p></div></section>
-    <form className="panel rag-form" onSubmit={event=>void submit(event)} aria-busy={isLoading}>
-      <fieldset disabled={isLoading}><legend>Câu hỏi và nguồn tìm kiếm</legend>
-        <label htmlFor="rag-question">Câu hỏi</label><textarea ref={question} id="rag-question" value={input.question} maxLength={2000} rows={4} onChange={e=>setInput({...input,question:e.target.value})} required/>
-        <label>Dự án<select value={input.project_id??""} onChange={event=>{setAnswer(undefined);setInput({...input,project_id:event.target.value||undefined});}}><option value="">Tất cả dự án có quyền truy cập</option>{projects.map(project=><option key={project.id} value={project.id}>{project.name}</option>)}</select></label>
-        <div className="rag-controls">
-          <label>Số cuộc họp tối đa (K)<input type="number" min={1} max={catalog?.max_k??10} value={input.k} onChange={e=>setInput({...input,k:e.target.valueAsNumber})} required/></label>
-          <label>Provider trả lời<select value={input.chat_provider_id} onChange={e=>catalog&&setInput(selectChatProvider(input,e.target.value,catalog))} required><option value="">Chọn provider</option>{catalog?.providers.filter(p=>p.chat_models.length).map(p=><option key={p.id} value={p.id}>{p.name} · {p.is_external?'Bên ngoài':'Local'}</option>)}</select></label>
-          <label>Model trả lời<select value={input.chat_model_id} onChange={e=>setInput({...input,chat_model_id:e.target.value})} required><option value="">Chọn model</option>{catalog?.providers.find(p=>p.id===input.chat_provider_id)?.chat_models.map(m=><option key={m}>{m}</option>)}</select></label>
-          <label>Embedding profile<select value={input.embedding_profile_id} onChange={e=>setInput({...input,embedding_profile_id:e.target.value})} required><option value="">Chọn profile</option>{catalog?.embedding_profiles.map(p=><option key={p.id} value={p.id}>{p.id}</option>)}</select></label>
-        </div>
-        {embeddingProvider&&<p>Embedding: {embeddingProvider.name} · {embeddingProvider.is_external?'Bên ngoài: câu hỏi và transcript được gửi để lập index/tìm kiếm.':'Local trên máy này.'}</p>}
-        <button className="primary" type="submit" disabled={!catalog?.embedding_profiles.length||!input.chat_model_id}>{isLoading?'Đang tìm và trả lời…':'Tìm câu trả lời'}</button>
-      </fieldset>
-      {catalog&&!catalog.embedding_profiles.length&&<p role="status">Chưa có index sẵn sàng. Chạy worker và hoàn tất backfill trước khi hỏi.</p>}
-      {error&&<p className="message" role="alert">{error}</p>}
-      <span className="rag-status" role="status">{isLoading?'Đang xử lý câu hỏi.':''}</span>
-    </form>
-    {answer&&<section className="panel rag-results" aria-label="Kết quả hỏi đáp">
-      <h3>{answer.retrieval_status==='answered'?'Câu trả lời':'Chưa đủ bằng chứng'}</h3><p className="rag-answer">{answer.answer}</p>
-      {!!answer.selected_meetings.length&&<><h3>Cuộc họp liên quan</h3><ul>{answer.selected_meetings.map(m=><li key={m.meeting_id}><Link to={`/workspace/${encodeURIComponent(m.meeting_id)}`}>{m.title}</Link> · Độ liên quan {m.relevance_score.toFixed(2)}</li>)}</ul></>}
-      {!!answer.citations.length&&<><h3>Nguồn trích dẫn</h3><ol>{answer.citations.map(c=><li key={c.source_id}><Link to={citationLocation(c)}>{c.meeting_title} · {c.speaker} · {c.start_seconds.toFixed(1)}–{c.end_seconds.toFixed(1)} giây</Link><p>{c.excerpt}</p><small>[{c.source_id}]</small></li>)}</ol></>}
-      <p>Trích dẫn hợp lệ xác nhận nguồn được sử dụng; hãy đối chiếu nội dung trước khi ra quyết định.</p>
-    </section>}
-  </div>;
+ const configDialog=useRef<HTMLDialogElement>(null);const configTrigger=useRef<HTMLButtonElement>(null);const messageScroll=useRef<HTMLDivElement>(null);
+ const [isHistoryOpen,setIsHistoryOpen]=useState(()=>window.innerWidth>=1000);
+ const {account}=useAuth();const [params,setParams]=useSearchParams();const selected=params.get('conversation')??'';
+ const [view,setView]=useState('mine');const [items,setItems]=useState<ConversationSummary[]>([]);const [cursor,setCursor]=useState<string|null>(null);
+ const [detail,setDetail]=useState<ConversationDetail>();const [projects,setProjects]=useState<Project[]>([]);
+ const [config,setConfig]=useState(initial);const [project,setProject]=useState('');const [draft,setDraft]=useState('');
+ const [catalog,setCatalog]=useState<ProviderCatalog>();const [index,setIndex]=useState<IndexStatus>();const [refresh,setRefresh]=useState(0);const [listRefresh,setListRefresh]=useState(0);
+ const [error,setError]=useState('');const [providerError,setProviderError]=useState('');const [busy,setBusy]=useState(false);const [recover,setRecover]=useState(false);const [loading,setLoading]=useState(false);
+ const active=useRef<AbortController | undefined>(undefined);const listRequest=useRef<AbortController | undefined>(undefined);const restoredDraft=useRef<{id:string;value:string;recover:boolean}|undefined>(undefined);const selectedRef=useRef(selected);selectedRef.current=selected;
+ function choose(id:string,preservedDraft='',needsRecovery=false){if(window.innerWidth<760)setIsHistoryOpen(false);restoredDraft.current={id,value:preservedDraft,recover:needsRecovery};active.current?.abort();setParams(previous=>{const next=new URLSearchParams(previous);id?next.set('conversation',id):next.delete('conversation');return next;});}
+ useEffect(()=>{let live=true;void projectApi.list().then(data=>{if(live)setProjects(data);}).catch(()=>{});return()=>{live=false;active.current?.abort();};},[]);
+ useEffect(()=>{const controller=new AbortController();listRequest.current=controller;void conversationApi.list(view,undefined,controller.signal).then(data=>{if(!controller.signal.aborted){setItems(data.items);setCursor(data.next_cursor);setDetail(value=>{const item=data.items.find(item=>item.id===value?.conversation.id);return value&&item?{...value,conversation:{...value.conversation,title:item.title}}:value;});}}).catch(cause=>{if(!controller.signal.aborted)setError(cause.message);});return()=>controller.abort();},[view,listRefresh]);
+ useEffect(()=>{const controller=new AbortController();active.current?.abort();setDetail(undefined);setError('');setRecover(restoredDraft.current?.id===selected&&restoredDraft.current.recover);setBusy(false);setDraft(restoredDraft.current?.id===selected?restoredDraft.current.value:'');restoredDraft.current=undefined;setConfig(initial);setProject('');
+ if(selected){setLoading(true);void conversationApi.detail(selected,undefined,controller.signal).then(data=>{if(!controller.signal.aborted){setDetail(data);setRecover(false);setConfig(data.conversation.config??initial);setProject(data.conversation.project_id??'');const last=data.turns.at(-1);if(last?.status==='completed')setDraft(value=>value.trim()===last.question?'':value);}}).catch(cause=>{if(!controller.signal.aborted){setError(cause.message);setRecover(true);}}).finally(()=>{if(!controller.signal.aborted)setLoading(false);});}else setLoading(false);
+ return()=>controller.abort();},[selected]);
+ useEffect(()=>{const controller=new AbortController();setCatalog(undefined);setIndex(undefined);setProviderError('');
+ void chatApi.providers(controller.signal,project||undefined).then(data=>{if(!controller.signal.aborted){setCatalog(data);if(!selected)setConfig(value=>{const provider=data.providers.find(p=>p.chat_models.length);return {...value,k:Math.min(value.k,data.max_k),chat_provider_id:provider?.id??'',chat_model_id:provider?.chat_models[0]??'',embedding_profile_id:data.embedding_profiles[0]?.id??''};});}}).catch(cause=>{if(!controller.signal.aborted)setProviderError(cause.message);});
+ void chatApi.indexStatus(controller.signal,project||undefined).then(data=>{if(!controller.signal.aborted)setIndex(data);}).catch(()=>{});return()=>controller.abort();},[project,refresh,selected]);
+ useEffect(()=>{if(!catalog||!detail||detail.conversation.config!==null)return;setConfig(value=>{if(value.chat_provider_id||value.chat_model_id||value.embedding_profile_id)return value;const provider=catalog.providers.find(p=>p.chat_models.length);return {...value,k:Math.min(value.k,catalog.max_k),chat_provider_id:provider?.id??'',chat_model_id:provider?.chat_models[0]??'',embedding_profile_id:catalog.embedding_profiles[0]?.id??''};});},[catalog,detail?.conversation.id]);
+ useEffect(()=>{if(!detail?.turns.some(turn=>turn.status==='running'))return;const controller=new AbortController();let count=0;let timer:ReturnType<typeof setTimeout>;
+ const poll=async()=>{try{const data=await conversationApi.detail(selected,undefined,controller.signal);if(controller.signal.aborted)return;setDetail(value=>mergeLatestDetail(value,data));const last=data.turns.at(-1);if(last?.status==='completed')setDraft(value=>value.trim()===last.question?'':value);if(data.turns.some(turn=>turn.status==='running')&&++count<45)timer=setTimeout(()=>void poll(),2000);else if(count>=45)setRecover(true);}catch{if(!controller.signal.aborted)setRecover(true);}};
+ timer=setTimeout(()=>void poll(),2000);return()=>{controller.abort();clearTimeout(timer);};},[selected,detail?.turns.some(turn=>turn.status==='running')]);
+ async function reload(){if(!selected)return;const controller=new AbortController();active.current=controller;setBusy(true);try{const data=await conversationApi.detail(selected,undefined,controller.signal);if(!controller.signal.aborted&&selectedRef.current===selected){setDetail(value=>mergeLatestDetail(value,data));if(!detail){setConfig(data.conversation.config??initial);setProject(data.conversation.project_id??'');}setRecover(false);const last=data.turns.at(-1);if(last?.status==='completed')setDraft(value=>value.trim()===last.question?'':value);}}catch{if(!controller.signal.aborted)setError('Không thể tải lại hội thoại.');}finally{if(selectedRef.current===selected)setBusy(false);}}
+ async function create(){const controller=new AbortController();active.current=controller;setBusy(true);try{const item=await conversationApi.create(project||null,controller.signal);if(controller.signal.aborted)return;setListRefresh(value=>value+1);setView('mine');choose(item.id);}catch(cause){if(!controller.signal.aborted)setError((cause as Error).message);}finally{if(!controller.signal.aborted)setBusy(false);}}
+ async function remove(){if(!selected||!window.confirm('Xóa hội thoại này?'))return;const controller=new AbortController();active.current=controller;setBusy(true);try{await conversationApi.delete(selected,controller.signal);if(controller.signal.aborted)return;choose('');setListRefresh(value=>value+1);}catch(cause){if(!controller.signal.aborted)setError((cause as Error).message);}finally{if(!controller.signal.aborted)setBusy(false);}}
+ async function submit(event:FormEvent){event.preventDefault();if(!catalog||busy||recover||(selected&&!detail))return;const problem=validateChatInput({...config,question:draft},catalog);if(problem){setError(problem);return;}
+ const controller=new AbortController();active.current=controller;let id=selected;setBusy(true);setError('');
+ try{let conversation=detail?.conversation;if(!conversation){conversation=await conversationApi.create(project||null,controller.signal);id=conversation.id;}if(conversation.project_id!==(project||null))await conversationApi.scope(id,project||null,controller.signal);
+ const turn=await conversationApi.append(id,draft.trim(),conversation.last_ordinal,config,controller.signal);if(controller.signal.aborted)return;if(!selected){setListRefresh(value=>value+1);choose(id,turn.status==='completed'?'':draft);return;}if(selectedRef.current!==id)return;
+ setDetail(value=>value?{...value,conversation:{...value.conversation,last_ordinal:turn.ordinal,config},turns:[...value.turns.filter(t=>t.id!==turn.id),turn]}:value);if(turn.status==='completed')setDraft('');else if(turn.status==='failed'||turn.status==='interrupted')setError(states[turn.status]);setListRefresh(value=>value+1);
+ }catch(cause){if(controller.signal.aborted)return;setError((cause as Error).message);if(!id){setListRefresh(value=>value+1);return;}try{const saved=await conversationApi.detail(id,undefined,controller.signal);if(!controller.signal.aborted&&!selected){const last=saved.turns.at(-1);choose(id,last?.question===draft.trim()&&last.status==='completed'?'':draft);setListRefresh(value=>value+1);return;}if(!controller.signal.aborted&&selectedRef.current===id){setDetail(value=>mergeLatestDetail(value,saved));setRecover(false);const last=saved.turns.at(-1);if(last?.question===draft.trim()&&last.status==='completed')setDraft('');}}catch{if(!controller.signal.aborted){if(!selected&&id)choose(id,draft,true);else setRecover(true);}}}
+ finally{if(!controller.signal.aborted)setBusy(false);}}
+ async function older(){if(!detail?.next_before_ordinal)return;const id=selected;const controller=new AbortController();active.current=controller;setBusy(true);try{const data=await conversationApi.detail(id,detail.next_before_ordinal,controller.signal);if(!controller.signal.aborted&&selectedRef.current===id)setDetail(value=>value?{...value,turns:[...data.turns,...value.turns],next_before_ordinal:data.next_before_ordinal}:value);}catch(cause){if(!controller.signal.aborted)setError((cause as Error).message);}finally{if(!controller.signal.aborted&&selectedRef.current===id)setBusy(false);}}
+ async function more(){if(!cursor||!listRequest.current)return;const signal=listRequest.current.signal;try{const data=await conversationApi.list(view,cursor,signal);if(signal.aborted)return;setItems(value=>[...value,...data.items]);setCursor(data.next_cursor);}catch(cause){if(!signal.aborted)setError((cause as Error).message);}}
+ useEffect(()=>{const area=messageScroll.current;if(area)area.scrollTop=area.scrollHeight;},[selected,detail?.conversation.last_ordinal,detail?.turns.at(-1)?.status]);
+ const readOnly=detail?.conversation.read_only??false;const running=detail?.turns.some(turn=>turn.status==='running')??false;
+ const valid=(!selected||!!detail)&&!!catalog&&!validateChatInput({...config,question:draft||'x'},catalog);
+ const gear=<button ref={configTrigger} type="button" className="chat-icon-button" aria-label="Cấu hình" aria-haspopup="dialog" aria-controls="rag-config" onClick={()=>configDialog.current?.showModal()}><Settings size={20}/></button>;
+ return <div className="page rag-page">
+ <div className={'conversation-layout'+(isHistoryOpen?'':' history-hidden')}><nav id="chat-history" hidden={!isHistoryOpen} className="conversation-nav" aria-label="Hội thoại"><button className="primary" disabled={busy} onClick={()=>void create()}>New Chat</button>{account?.is_system_admin&&<div className="conversation-tabs"><button aria-pressed={view==='mine'} onClick={()=>setView('mine')}>Của tôi</button><button aria-pressed={view==='others'} onClick={()=>setView('others')}>Người khác</button></div>}{items.map(item=><button className="conversation-entry" key={item.id} aria-current={item.id===selected?'page':undefined} onClick={()=>choose(item.id)}><strong>{item.title}</strong>{view==='others'&&<small>{item.creator_email}</small>}</button>)}{cursor&&<button onClick={()=>void more()}>Tải thêm hội thoại</button>}</nav>
+ <section className="conversation-main" aria-label="Hội thoại hiện tại" aria-busy={busy||loading}><header><button type="button" className="chat-icon-button" aria-label="Ẩn/hiện lịch sử" aria-expanded={isHistoryOpen} aria-controls="chat-history" onClick={()=>setIsHistoryOpen(value=>!value)}><PanelLeft size={20}/></button><h3>{detail?.conversation.title??'New Chat'}</h3>{readOnly?<><span>Chỉ đọc</span>{gear}</>:selected&&<button disabled={busy||loading} onClick={()=>void remove()}>Xóa hội thoại</button>}</header><div ref={messageScroll} className="conversation-scroll">{loading&&<p role="status">Đang tải hội thoại…</p>}{detail?.next_before_ordinal&&<button disabled={busy} onClick={()=>void older()}>Tin nhắn trước</button>}<div className="conversation-timeline">{detail?.turns.map(turn=><Turn key={turn.id} turn={turn}/>)}</div>
+ {error&&<p role="alert">{error}</p>}{recover&&<button disabled={busy||loading} onClick={()=>void reload()}>Tải lại hội thoại</button>}</div>{!readOnly&&<form onSubmit={event=>void submit(event)} className="conversation-composer"><label className="chat-sr-only" htmlFor="rag-question">Câu hỏi</label><textarea placeholder="Nhắn tin…" id="rag-question" value={draft} onChange={event=>setDraft(event.target.value)} rows={2} maxLength={2000} required disabled={loading||busy||running}/>{gear}<button className="primary" disabled={!valid||busy||loading||running||recover} type="submit">{busy||running?'Đang trả lời…':'Gửi'}</button></form>}</section>
+ </div><dialog id="rag-config" ref={configDialog} className="conversation-config-dialog" aria-labelledby="rag-config-title" onClose={()=>configTrigger.current?.focus()} onClick={event=>{if(event.target!==event.currentTarget)return;const rect=event.currentTarget.getBoundingClientRect();if(event.clientX<rect.left||event.clientX>rect.right||event.clientY<rect.top||event.clientY>rect.bottom)event.currentTarget.close();}}><div className="config-drawer-header"><h2 id="rag-config-title">Cấu hình</h2><button autoFocus type="button" className="chat-icon-button" aria-label="Đóng cấu hình" onClick={()=>configDialog.current?.close()}><X size={20}/></button></div><aside className="rag-form conversation-config"><fieldset disabled={readOnly||busy||loading||running}><legend className="chat-sr-only">Cấu hình</legend><label>Dự án<select disabled={readOnly||busy||!!detail?.conversation.last_ordinal} value={project} onChange={event=>setProject(event.target.value)}><option value="">Tất cả dự án có quyền truy cập</option>{project&&!projects.some(p=>p.id===project)&&<option value={project}>Dự án không khả dụng</option>}{projects.map(p=><option key={p.id} value={p.id}>{p.name}</option>)}</select></label>
+ <label>Provider trả lời<select value={config.chat_provider_id} onChange={event=>{const provider=catalog?.providers.find(p=>p.id===event.target.value);setConfig({...config,chat_provider_id:event.target.value,chat_model_id:provider?.chat_models[0]??''});}}><option value="">Chọn provider</option>{config.chat_provider_id&&!catalog?.providers.some(p=>p.id===config.chat_provider_id)&&<option value={config.chat_provider_id}>Provider không khả dụng</option>}{catalog?.providers.filter(p=>p.chat_models.length).map(p=><option key={p.id} value={p.id}>{p.name} · {p.is_external?'Bên ngoài':'Local'}</option>)}</select></label>
+ <label>Model trả lời<select value={config.chat_model_id} onChange={event=>setConfig({...config,chat_model_id:event.target.value})}><option value="">Chọn model</option>{config.chat_model_id&&!catalog?.providers.find(p=>p.id===config.chat_provider_id)?.chat_models.includes(config.chat_model_id)&&<option value={config.chat_model_id}>Model không khả dụng</option>}{catalog?.providers.find(p=>p.id===config.chat_provider_id)?.chat_models.map(model=><option key={model}>{model}</option>)}</select></label>
+ <label>Embedding profile<select value={config.embedding_profile_id} onChange={event=>setConfig({...config,embedding_profile_id:event.target.value})}><option value="">Chọn profile</option>{config.embedding_profile_id&&!catalog?.embedding_profiles.some(p=>p.id===config.embedding_profile_id)&&<option value={config.embedding_profile_id}>Profile không khả dụng</option>}{catalog?.embedding_profiles.map(p=><option key={p.id}>{p.id}</option>)}</select></label>
+ <label>Số cuộc họp tối đa (K)<input type="number" min={1} max={catalog?.max_k??10} value={config.k} onChange={event=>setConfig({...config,k:event.target.valueAsNumber})}/></label><label htmlFor="context-weight">Trọng số ngữ cảnh</label><input id="context-weight" type="range" min={0} max={1} step={.01} value={config.context_weight} onChange={event=>setConfig({...config,context_weight:event.target.valueAsNumber})}/><div className="weight-labels"><span>Keyword {(1-config.context_weight).toFixed(2)}</span><span>Cosine {config.context_weight.toFixed(2)}</span></div><label className="knowledge-option"><input type="checkbox" checked={config.allow_model_knowledge??false} onChange={event=>setConfig({...config,allow_model_knowledge:event.target.checked})}/>Cho phép kiến thức ngoài cuộc họp</label></fieldset>
+ {providerError&&<p role="alert">{providerError}</p>}<button disabled={busy} onClick={()=>setRefresh(value=>value+1)}>Làm mới trạng thái</button>{index?.profiles.map(profile=><div key={profile.profile_id}>{profile.meetings.filter(m=>m.state!=='ready').map(meeting=><p key={meeting.meeting_id}><Link to={'/workspace/'+encodeURIComponent(meeting.meeting_id)}>{meeting.title}</Link> · {meeting.state}</p>)}</div>)}</aside></dialog></div>;
+}
+function Turn({turn}:{turn:ConversationTurn}){return <article className="conversation-turn">{turn.status==='redacted'?<p role="status">{states.redacted}</p>:<>{turn.question&&<div className="conversation-question"><p>{turn.question}</p></div>}{states[turn.status]&&<p role="status">{states[turn.status]}</p>}{turn.answer&&<div className="rag-results">{turn.answer.parts?.length?turn.answer.parts.map((part,index)=><div key={index}><p className="rag-answer">{part.text}</p>{turn.status!=='stale'&&part.citation_ids.map(id=>{const citation=turn.answer!.citations.find(citation=>citation.source_id===id);return citation?<Link key={id} to={citationLocation(citation)}>Nghe audio · {citation.speaker} · {citation.start_seconds.toFixed(1)}–{citation.end_seconds.toFixed(1)} giây</Link>:null;})}</div>):<p className="rag-answer">{turn.answer.answer}</p>}{turn.status!=='stale'&&!!turn.answer.citations.length&&<details><summary>Nguồn trích dẫn</summary><ol>{turn.answer.citations.map(citation=><li key={citation.source_id}><Link to={citationLocation(citation)}>Nghe audio · {citation.speaker} · {citation.start_seconds.toFixed(1)}–{citation.end_seconds.toFixed(1)} giây</Link><p>{citation.excerpt}</p></li>)}</ol></details>}</div>}</>}</article>;}
+
+function mergeLatestDetail(current:ConversationDetail|undefined,latest:ConversationDetail):ConversationDetail{
+ if(!current||current.conversation.id!==latest.conversation.id)return latest;
+ const turns=new Map(current.turns.map(turn=>[turn.ordinal,turn]));
+ latest.turns.forEach(turn=>turns.set(turn.ordinal,turn));
+ return {...latest,turns:[...turns.values()].sort((left,right)=>left.ordinal-right.ordinal),next_before_ordinal:current.turns.length?current.next_before_ordinal:latest.next_before_ordinal};
 }

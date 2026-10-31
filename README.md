@@ -135,7 +135,7 @@ Install Python 3.10+, uv and FFmpeg. Configure PostgreSQL with pgvector and use 
 ```bash
 uv sync
 PYTHONPATH=apps/api uv run --env-file .env python -m app.db.migrate
-PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000
+PYTHONPATH=apps/api uv run --env-file .env uvicorn app.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
 Start the meeting worker in another terminal:
@@ -160,11 +160,13 @@ Copy `.env.example` to `.env` and keep credentials out of Git. Shell variables o
 | `HUGGINGFACE_TOKEN` | Access to gated pyannote models after accepting the model agreement |
 | `PHOWHISPER_MODEL`, `WHISPER_MODEL`, `SILERO_LANG95_MODEL`, `PYANNOTE_MODEL` | Speech and diarization model sources |
 | `MODEL_DEVICE` | `auto`, `cpu` or `cuda` |
+| `AUDIO_MAX_CONCURRENT_INFERENCES` | Positive integer; simultaneous stateless audio inferences per API process, default `1` |
 | `DATABASE_URL`, `POSTGRES_*` | PostgreSQL connection and Compose settings |
 | `MEETING_DATA_DIR` | Private audio root shared by application processes |
 | `BOT_CHROME_PATH`, `BOT_AUDIO_SINK`, `BOT_ADMISSION_TIMEOUT_SECONDS` | Meet bot browser, dedicated audio sink and admission timeout |
 | `RAG_ENABLED`, `RAG_PROVIDERS_JSON`, `RAG_EMBEDDING_PROFILES_JSON` | Opt-in RAG and provider/embedding allowlists |
 | `RAG_MAX_K`, `RAG_MIN_COSINE_SIMILARITY`, `RAG_PROMPT_VERSION` | Retrieval limits, initial uncalibrated threshold and prompt version |
+| `RAG_RETRIEVAL_VERSION` | `hybrid-v1` (default) or experimental `lexical-v2` |
 | `DEEPSEEK_API_KEY` | Optional server-side DeepSeek credential |
 | `PYANNOTE_REVISION`, `VOICE_IDENTIFICATION_ENABLED` | Voice enrollment revision and automatic matching switch |
 | `AUTH_COOKIE_SECURE` | Require HTTPS and Secure session cookies |
@@ -244,6 +246,69 @@ Open `http://127.0.0.1:5173/app/`, sign in and open an assigned project to uploa
 
 Interactive API documentation: `http://127.0.0.1:8000/docs`. OpenAPI schema: `http://127.0.0.1:8000/openapi.json`.
 
+Chat ranks sources with `0.8 × cosine + 0.2 × keyword coverage`. These are ranking
+scores, not confidence probabilities. Before answering, the selected chat model
+makes a separate structured relevance-filter call; only accepted passages enter
+the answer context, with K applied afterward. The additional call shares the
+existing 60-second request deadline and may increase latency/provider cost.
+Empty or malformed filter output returns insufficient evidence; provider errors
+remain safe HTTP errors, with no fallback to unfiltered sources.
+
+`RagAnswer.answer` now contains plain paragraphs without inline citation IDs.
+The structured `citations` fields and audio/timestamp links are unchanged. The
+UI hides source IDs and numeric scores, and related meetings include only
+sources actually cited by the answer. This is an intentional text-format and
+selection change; API clients should use `citations`, not parse answer markers.
+The fixed relevance prompt is versioned separately from Admin's answer prompt.
+Evaluation state records its version/hash and ranking weights. No migration or
+embedding reindex is needed. Roll back the application release to restore the
+previous weights and generation flow; stored transcripts/indexes are unchanged.
+
+### RAG conversations
+
+Apply shared migration `008_rag_conversations.sql` before starting the updated API.
+The search screen stores conversations until their creator deletes them. Only the
+creator can continue or delete a conversation; Admin can read other users' conversations.
+Deletion removes its turns and source dependencies. History remains readable and
+deletable when RAG is disabled. `/api/chat/queries` remains stateless.
+
+Each submitted turn saves its provider, model, embedding profile, meeting limit K
+and similarity weight. The slider uses `context_weight * cosine +
+(1 - context_weight) * keyword`, default `0.8`; the semantic source filter still
+applies. Saved unavailable models require an explicit selection. Project scope
+can change only before the first turn.
+
+Chat classifies each message using at most six recent eligible question/answer pairs
+within a 2,000-token estimate. Greetings and clarifications skip retrieval; factual
+questions retrieve meeting evidence first. Rewrites reload the selected prior answer's
+supporting sources and keep citations. Inaccessible or deleted sources
+hide dependent turns; changed transcripts mark old answers stale and exclude them
+from follow-up context. Previous answers are not evidence for new answers.
+Writes require session/CSRF authentication. Requests use UUID idempotency, one active
+turn per conversation, a 90-second recovery lease and the existing 60-second deadline.
+
+The config checkbox **Cho phép kiến thức ngoài cuộc họp** defaults off and is saved
+per turn. When enabled, model knowledge may supplement meeting evidence naturally,
+without a label; facts from retrieved sources still require audio/timeline citations.
+The checkbox does not enable Internet search. Turning it off removes previous model
+parts from the context sent for the next turn. Retrieval infrastructure failures stay
+explicit errors. Old configs default to off and old answers remain readable.
+
+Chat uses a left conversation list and an internally scrolling message area with
+the composer at the bottom. The gear icon opens configuration in a right drawer;
+close it with the close icon, Escape or backdrop. User messages align right.
+
+Routing and follow-up quality depend on the selected model. The local `qwen3:0.6b` development
+smoke run failed to reliably preserve intent or request clarification; JSON validation
+does not validate meaning. Reproduce the five-case synthetic check with
+`PYTHONPATH=apps/api uv run python ai_training/evaluation/evaluate_meeting_chatbot.py --model qwen3:0.6b --output ai_training/results/meeting-chatbot.json`.
+Use held-out conversations before treating follow-ups as quality-validated.
+
+The conversation API is `/api/chat/conversations`: list/create, read/update/delete
+`/{id}`, and submit `/{id}/turns`. Lists use cursors; history returns 50 turns per page.
+To roll back, restore the previous application release and retain the additive tables;
+there is no automatic destructive down migration.
+
 ### Stateless audio processing
 
 ```bash
@@ -252,6 +317,8 @@ curl --fail-with-body -X POST http://127.0.0.1:8000/api/audio/process \
 ```
 
 The current route accepts FFmpeg-supported audio up to 100 MiB and 30 minutes. FFmpeg decodes to 16 kHz mono float32 samples. The response follows `AudioProcessResponse` in `apps/api/app/schemas/transcript.py`; timestamps refer to original audio and overlapping diarization turns are retained. Invalid audio returns HTTP 400, oversized uploads return 413, and unavailable models return 503. This local endpoint is unauthenticated and does not persist results.
+
+Stateless inference is limited to `AUDIO_MAX_CONCURRENT_INFERENCES` running tasks per API process (default `1`). Excess requests receive HTTP 429 with `Retry-After: 5`; they are not queued for inference. A cancelled request retains its slot until its inference thread finishes. This limit does not cover uploads, meeting workers or other API processes; use one API process on a memory-constrained host.
 
 ### Local accounts
 
@@ -290,6 +357,8 @@ Shared voice names are company-wide; meeting-derived samples and enrollment jobs
 
 `/api/audio/process` remains a stateless, unauthenticated local API with its existing response contract. It does not read stored meetings. Keep API ports bound to loopback. Before company-network hosting, configure HTTPS, Secure cookies and trusted deployment origins, review every exposed endpoint (including stateless processing), and review proxy/Host/Origin handling. The current local guards intentionally reject remote peers; enabling Secure cookies alone does not enable network hosting.
 
+Keep `--no-proxy-headers` on Uvicorn, including native development commands. Local deployment uses the socket peer and transport scheme; client-supplied forwarding headers must not change authentication rate-limit identities or HTTPS checks. Nginx removes forwarding headers before proxying. A future HTTPS deployment requires an explicit trusted-proxy design.
+
 For password recovery, a trusted administrator with local database access must first
 confirm the person's identity outside the app; email ownership is unverified.
 Run `PYTHONPATH=apps/api uv run --env-file .env python -m app.commands.recover_password`
@@ -302,6 +371,53 @@ operators and communicate the temporary credential privately; the user should th
 change it through their account. There is no public password reset endpoint.
 
 ## 8. Testing & Evaluation
+
+### RAG index status and experiments
+
+Chat shows index readiness for the selected project and a **Làm mới trạng thái**
+button. `GET /api/chat/index-status?project_id=...` returns accessible completed
+meetings grouped by profile: `ready`, `pending`, `running`, `failed` or `stale`,
+with attempt counts and sanitized failure codes. Profile `configuration_status`
+is `valid`, `not_registered` or `changed`. Both this endpoint and
+`GET /api/chat/providers?project_id=...` require a session. Omit `project_id` for
+all accessible projects. Queries still require a complete current index in their
+scope; incomplete data is never silently omitted.
+
+Failed jobs can be retried with the existing worker `--backfill` flag. Stop the
+managed `rag-worker` before running a manual worker, then restart it afterward;
+do not run two workers. No retry-write API is added.
+
+The answer evaluator now signs in and sends CSRF automatically. Use an account
+restricted to an approved evaluation library; its password is prompted without
+echo and is never a CLI argument or report field. Sessions are logged out when
+the run ends. See [evaluation format and commands](ai_training/evaluation/meeting_rag_dataset.md).
+
+For retrieval-only development measurements, use a disposable
+`TEST_DATABASE_URL` and local Ollama embeddings:
+
+```bash
+PYTHONPATH=apps/api uv run python ai_training/evaluation/benchmark_meeting_retrieval.py \
+  --embedding-model YOUR_LOCAL_MODEL --corpus long-v1 \
+  --output ai_training/results/rag-baseline.json
+```
+
+The benchmark creates and drops its own random schema, generates synthetic
+transcripts, and never uses `DATABASE_URL` or existing meetings. It measures
+retrieval, not generated-answer correctness. Repeat with
+`--chunk-revision turns-v2`, `--retrieval-version lexical-v2`, or both, and
+`--compare-report ai_training/results/rag-baseline.json`. Reports stay ignored.
+
+Runtime defaults remain `utf8-v1` chunking and `hybrid-v1` retrieval.
+`turns-v2` preserves sentence/word boundaries when they fit the byte budget;
+oversized words fall back to Unicode character boundaries, and timestamps remain
+segment-level. Whole-sentence overlap may be smaller than 60 estimated tokens.
+To try it, add a **new profile ID** with `chunk_revision="turns-v2"`, retain the
+old profile, and let the worker backfill. Never change an existing profile's
+definition. `RAG_RETRIEVAL_VERSION=lexical-v2` enables experimental question-word
+filtering and OR lexical retrieval. Restore `hybrid-v1` and select the retained
+old profile to roll back; no schema migration is needed. Neither candidate is
+promoted by synthetic results; deployment needs held-out quality and latency
+comparisons. Citation validation still checks source membership, not entailment.
 
 Run API tests from the repository root. Tests use fake inference models and real FFmpeg decoding. PostgreSQL integration tests require an isolated `TEST_DATABASE_URL` and use random schemas.
 

@@ -15,7 +15,7 @@ class RoutesTest(unittest.IsolatedAsyncioTestCase):
         class Service:
             error = None
             registry = ProviderRegistry(settings)
-            async def catalog(inner, account_id):
+            async def catalog(inner, account_id, project_id=None):
                 self.assertEqual(account_id, 'reader')
                 return inner.registry.catalog(['p'])
             async def query(inner, request, account_id):

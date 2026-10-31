@@ -43,6 +43,8 @@ class ProjectAccessIntegrationTest(PostgresAsyncTestCase):
             self.calls.append(messages)
             if 'sources' in json.loads(messages[1]['content']):
                 sources = json.loads(messages[1]['content'])['sources']
+                if 'source_ids' in messages[0]['content']:
+                    return json.dumps({'source_ids':[s['source_id'] for s in sources]})
                 return json.dumps({'status':'answered', 'claims':[{'text':'Visible plan', 'citation_ids':[sources[0]['source_id']]}]})
             return '{"summary":"Visible summary"}'
 
@@ -94,6 +96,8 @@ class ProjectAccessIntegrationTest(PostgresAsyncTestCase):
             if allowed:
                 self.assertTrue(answer.json()['citations'], answer.text)
                 self.assertTrue(self.calls, 'Authorized query never reached generation provider')
+                self.assertEqual(len(self.calls), 2)
+                self.assertIn('relevance_filter_v1', self.calls[0][0]['content'])
             else:
                 self.assertEqual(self.calls, [])
             if role != 'admin':

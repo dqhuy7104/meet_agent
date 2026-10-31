@@ -33,6 +33,7 @@ class PostgresTest(unittest.TestCase):
         from app.core.rag_config import RagError
         self.repository.publish(self.snapshot, self.profile, self.chunks, [[1., 0.]])
         self.repository.publish(self.snapshot, self.profile, self.chunks, [[1., 0.]])
+
         self.assertEqual(self.connection.execute('SELECT count(*) FROM rag_chunk_embeddings').fetchone()[0], 1)
         with self.assertRaises(RagError):
             self.repository.publish(self.snapshot, self.profile, self.chunks, [[1.]])
@@ -47,6 +48,18 @@ class PostgresTest(unittest.TestCase):
         for table in ('rag_chunks', 'rag_chunk_embeddings', 'rag_publications', 'rag_index_jobs'):
             self.assertEqual(self.connection.execute('SELECT count(*) FROM ' + table).fetchone()[0], 0)
 
+    def test_index_states_distinguish_pending_failed_and_expired_lease(self):
+        self.repository.queue(self.profile, self.snapshot)
+        rows = self.repository.index_states('p', [self.snapshot.meeting_id])
+        self.assertEqual(rows[0][3], 'pending')
+        self.repository.claim()
+        self.assertFalse(self.repository.index_states('p', [self.snapshot.meeting_id])[0][-1])
+        self.connection.execute("UPDATE rag_index_jobs SET lease_until=now()-interval '1 second'")
+        self.assertTrue(self.repository.index_states('p', [self.snapshot.meeting_id])[0][-1])
+        self.repository.fail_job('p', self.snapshot.meeting_id, 'provider_unavailable', False)
+        self.assertEqual(self.repository.index_states('p', [self.snapshot.meeting_id])[0][3], 'failed')
+        self.assertEqual(self.repository.index_states('p', ['hidden']), [])
+
     def test_profile_immutability_and_empty_publication(self):
         from app.core.rag_config import RagError
         with self.assertRaises(RagError):
@@ -55,6 +68,13 @@ class PostgresTest(unittest.TestCase):
         self.repository.publish(self.snapshot, self.profile, [], [])
         self.assertEqual(self.repository.manifest('p', self.snapshot.meeting_id), self.snapshot.revision)
         self.assertEqual(self.repository.search('p', 'Việt', [1., 0.], self.meeting_ids()), ([], []))
+
+    def test_v2_lexical_search_does_not_require_every_question_word(self):
+        self.repository.publish(self.snapshot, self.profile, self.chunks, [[1., 0.]])
+        question = 'Ai chịu trách nhiệm kế hoạch Việt Nam?'
+        self.assertEqual(self.repository.search('p', question, [1., 0.], self.meeting_ids())[1], [])
+        self.assertEqual(len(self.repository.search('p', question, [1., 0.], self.meeting_ids(), 'lexical-v2')[1]), 1)
+        self.assertEqual(self.repository.search('p', 'Ai và gì?', [1., 0.], self.meeting_ids(), 'lexical-v2')[1], [])
 
     def test_failed_sql_batch_keeps_old_revision(self):
         self.repository.publish(self.snapshot, self.profile, self.chunks, [[1., 0.]])
